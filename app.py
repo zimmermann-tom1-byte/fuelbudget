@@ -95,15 +95,15 @@ with st.sidebar.form("add_transaction_form", clear_on_submit=True):
 # Neue Transaktion direkt in Supabase speichern
 if submitted:
     if new_amount > 0:
-            st_supabase.table("transactions").insert([{
-                "date": str(new_date),
-                "amount": float(new_amount),
-            }]).execute()
+        st_supabase.table("transactions").insert([{
+            "date": str(new_date),
+            "amount": float(new_amount),
+        }]).execute()
             
-            st.success("Erfolgreich in der Cloud gespeichert!")
-            st.rerun()
+        st.success("Erfolgreich in der Cloud gespeichert!")
+        st.rerun()
      else:
-            st.error("Bitte erst alle Felder gültig ausfüllen.")
+        st.error("Bitte erst alle Felder gültig ausfüllen.")
 
 # --- BERECHNUNG DER PROGNOSEMODELLE ---
 amounts = df["amount"]
