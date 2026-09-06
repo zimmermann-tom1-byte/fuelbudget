@@ -22,7 +22,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- SUPABASE DATABASE CONNECTION ---
-st_supabase = st.connection("supabase", type=SupabaseConnection)
+from supabase import create_client
+
+url = st.secrets["SUPABASE_URL"]
+key = st.secrets["SUPABASE_KEY"]
+st_supabase = create_client(url, key)
 
 def load_data():
     response = st_supabase.table("transactions").select("*").execute()
