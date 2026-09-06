@@ -79,7 +79,6 @@ if df.empty:
     {"date": "2026-08-01", "amount": 39.84, "location": "Tankstelle"},
     {"date": "2026-08-12", "amount": 60.97, "location": "Tankstelle"}
 ]
-    ]
     st_supabase.table("transactions").insert(initial_data).execute()
     df = load_data()
 
