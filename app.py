@@ -17,7 +17,8 @@ st.markdown("""
 <style>
     .main { background-color: #020617; color: #f8fafc; }
     .stMetric { background-color: #0f172a; border: 1px solid #1e293b; padding: 15px; border-radius: 12px; }
-    div[data-testid="stForm"] { background-color: #0f172a; border: 1px solid #1e293b; border-radius: 12px; }
+    div[data-testid="stForm"] { background-color: #0f172a; border: 1px solid #1e293b; }
+    div[data-testid="stDataFrame"] { background-colour: #0f172a; border-radius: 12px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -33,7 +34,7 @@ def load_data():
     df = pd.DataFrame(response.data)
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values("date").reset_index(drop=True)
+        df = df.sort_values("date", ascending=False).reset_index(drop=True)
     return df
 
 df = load_data()
