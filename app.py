@@ -20,10 +20,58 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# --- HISTORISCHE STAMM-DATEN (36 Tankvorgänge) ---
+INITIAL_DATA = [
+    {"date": "2026-02-11", "amount": 34.39, "location": "SB Tank 9893"},
+    {"date": "2026-02-13", "amount": 26.99, "location": "SB Tank 9893"},
+    {"date": "2026-02-17", "amount": 57.40, "location": "JET Tankstelle"},
+    {"date": "2026-02-22", "amount": 3.54, "location": "Aral"},
+    {"date": "2026-02-27", "amount": 9.90, "location": "SB Tank 9893"},
+    {"date": "2026-02-28", "amount": 57.25, "location": "TANKSTELLE P. BECKER"},
+    {"date": "2026-02-28", "amount": 20.15, "location": "TANKSTELLE P. BECKER"},
+    {"date": "2026-03-04", "amount": 29.72, "location": "AVIA"},
+    {"date": "2026-03-09", "amount": 57.03, "location": "JET Tankstelle"},
+    {"date": "2026-03-15", "amount": 46.77, "location": "AVIA"},
+    {"date": "2026-03-22", "amount": 30.01, "location": "JET Tankstelle"},
+    {"date": "2026-03-27", "amount": 86.79, "location": "TANKSTELLE P. BECKER"},
+    {"date": "2026-04-05", "amount": 62.92, "location": "JET Tankstelle"},
+    {"date": "2026-04-10", "amount": 4.49, "location": "DE PANJERD"},
+    {"date": "2026-04-12", "amount": 5.25, "location": "TotalEnergies"},
+    {"date": "2026-04-12", "amount": 3.99, "location": "Esso"},
+    {"date": "2026-04-17", "amount": 57.89, "location": "TANKSTELLE P. BECKER"},
+    {"date": "2026-04-29", "amount": 71.83, "location": "CALPAM TANKAUTOMAT"},
+    {"date": "2026-04-30", "amount": 3.74, "location": "Aral"},
+    {"date": "2026-05-06", "amount": 36.11, "location": "CALPAM TANKAUTOMAT"},
+    {"date": "2026-05-08", "amount": 26.35, "location": "SB Tank 9893"},
+    {"date": "2026-05-16", "amount": 61.09, "location": "Raiffeisen Westfalen Mitte"},
+    {"date": "2026-05-27", "amount": 68.25, "location": "SB Tank 9893"},
+    {"date": "2026-06-07", "amount": 30.33, "location": "TANKSTELLE P. BECKER"},
+    {"date": "2026-06-10", "amount": 16.08, "location": "JET Tankstelle"},
+    {"date": "2026-06-15", "amount": 49.95, "location": "JET Tankstelle"},
+    {"date": "2026-06-17", "amount": 16.01, "location": "SB Tank 9893"},
+    {"date": "2026-06-27", "amount": 63.63, "location": "CALPAM TANKAUTOMAT"},
+    {"date": "2026-06-30", "amount": 64.81, "location": "SB Tank 9893"},
+    {"date": "2026-07-03", "amount": 26.88, "location": "CALPAM TANKAUTOMAT"},
+    {"date": "2026-07-05", "amount": 5.23, "location": "JET Tankstelle"},
+    {"date": "2026-07-13", "amount": 73.39, "location": "Tankstelle"},
+    {"date": "2026-07-20", "amount": 50.00, "location": "Tankstelle"},
+    {"date": "2026-07-30", "amount": 69.70, "location": "Tankstelle"},
+    {"date": "2026-08-01", "amount": 39.84, "location": "Tankstelle"},
+    {"date": "2026-08-12", "amount": 60.97, "location": "Tankstelle"}
+]
+
 # --- SUPABASE CLIENT INITIALIZATION ---
 url = st.secrets["connections"]["supabase"]["SUPABASE_URL"]
 key = st.secrets["connections"]["supabase"]["SUPABASE_KEY"]
 supabase = create_client(url, key)
+
+# --- AUTOMATISCHER INITIAL-UPLOAD IN SUPABASE ---
+def seed_initial_data_if_empty():
+    res = supabase.table("transactions").select("id", count="exact").execute()
+    if res.count == 0 or len(res.data) == 0:
+        supabase.table("transactions").insert(INITIAL_DATA).execute()
+
+seed_initial_data_if_empty()
 
 # --- DATA FETCHING FROM SUPABASE ---
 def load_data():
@@ -226,7 +274,6 @@ with col_list:
         display_df["date"] = display_df["date"].dt.strftime("%d.%m.%Y")
         display_df["amount"] = display_df["amount"].map("{:.2f} €".format)
         
-        # Zeige nur die 3 gewünschten Spalten an
         cols_to_show = [col for col in ["date", "amount", "location"] if col in display_df.columns]
         display_df = display_df[cols_to_show]
         display_df.rename(columns={"date": "Datum", "amount": "Betrag", "location": "Tankstelle"}, inplace=True)
