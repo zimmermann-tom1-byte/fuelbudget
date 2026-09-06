@@ -24,8 +24,8 @@ st.markdown("""
 # --- SUPABASE DATABASE CONNECTION ---
 from supabase import create_client
 
-url = st.secrets["SUPABASE_URL"]
-key = st.secrets["SUPABASE_KEY"]
+url = st.secrets["connections"]["supabase"]["SUPABASE_URL"]
+key = st.secrets["connections"]["supabase"]["SUPABASE_KEY"]
 st_supabase = create_client(url, key)
 
 def load_data():
