@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as bg
+import plotly.graph_objects as go
 from datetime import datetime
-from supabase import create_client
+from st_supabase_connection import SupabaseConnection
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -14,14 +14,34 @@ st.set_page_config(
 
 # Custom Dark Theme Styling
 st.markdown("""
-    <style>
+<style>
     .main { background-color: #020617; color: #f8fafc; }
     .stMetric { background-color: #0f172a; border: 1px solid #1e293b; padding: 15px; border-radius: 12px; }
-    </style>
+    div[data-testid="stForm"] { background-color: #0f172a; border: 1px solid #1e293b; }
+    div[data-testid="stDataFrame"] { background-colour: #0f172a; border-radius: 12px; }
+</style>
 """, unsafe_allow_html=True)
 
-# --- HISTORISCHE STAMM-DATEN (36 Tankvorgänge) ---
-INITIAL_DATA = [
+# --- SUPABASE DATABASE CONNECTION ---
+from supabase import create_client
+
+url = st.secrets["SUPABASE_URL"]
+key = st.secrets["SUPABASE_KEY"]
+st_supabase = create_client(url, key)
+
+def load_data():
+    response = st_supabase.table("transactions").select("*").execute()
+    df = pd.DataFrame(response.data)
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date", ascending=False).reset_index(drop=True)
+    return df
+
+df = load_data()
+
+# --- INITIAL DATA SEEDING (falls Datenbank leer ist) ---
+if df.empty:
+    initial_data = [
     {"date": "2026-02-11", "amount": 34.39, "location": "SB Tank 9893"},
     {"date": "2026-02-13", "amount": 26.99, "location": "SB Tank 9893"},
     {"date": "2026-02-17", "amount": 57.40, "location": "JET Tankstelle"},
@@ -59,230 +79,138 @@ INITIAL_DATA = [
     {"date": "2026-08-01", "amount": 39.84, "location": "Tankstelle"},
     {"date": "2026-08-12", "amount": 60.97, "location": "Tankstelle"}
 ]
+    st_supabase.table("transactions").insert(initial_data).execute()
+    df = load_data()
 
-# --- SUPABASE CLIENT INITIALIZATION ---
-url = st.secrets["connections"]["supabase"]["SUPABASE_URL"]
-key = st.secrets["connections"]["supabase"]["SUPABASE_KEY"]
-supabase = create_client(url, key)
+# --- HEADER & SIDEBAR ---
+st.title("FuelBudget 🚗⛽")
+st.caption("Präzise Kraftstoffbudgetierung & Verbrauchsanalyse")
 
-# --- AUTOMATISCHER INITIAL-UPLOAD IN SUPABASE ---
-def seed_initial_data_if_empty():
-    res = supabase.table("transactions").select("id", count="exact").execute()
-    if res.count == 0 or len(res.data) == 0:
-        supabase.table("transactions").insert(INITIAL_DATA).execute()
-
-seed_initial_data_if_empty()
-
-# --- DATA FETCHING FROM SUPABASE ---
-def load_data():
-    response = supabase.table("transactions").select("*").execute()
-    df = pd.DataFrame(response.data)
-    if not df.empty:
-        df["date"] = pd.to_datetime(df["date"])
-        df["amount"] = df["amount"].astype(float)
-    else:
-        df = pd.DataFrame(columns=["date", "amount", "location"])
-    return df
-
-transactions_df = load_data()
-
-# --- HEADER ---
-st.title("⛽ FuelBudget")
-st.caption("Prädiktive Kraftstoffkosten-Budgetierung mittels statistischer Glättungsmodelle.")
-
-# --- SIDEBAR / CONTROLS ---
-st.sidebar.header("⚙️ Modell-Konfiguration")
-
-calc_mode = st.sidebar.selectbox(
-    "Berechnungs-Modus",
-    ["EMA", "SMA", "WMA"],
-    help="SMA: Einfacher Durchschnitt | WMA: Linear gewichtet | EMA: Exponentiell geglättet"
-)
-
-k_factor = st.sidebar.slider(
-    "EMA-Glättungsfaktor (K)",
-    min_value=0.01,
-    max_value=1.00,
-    value=0.15,
-    step=0.01,
-    disabled=(calc_mode != "EMA")
-)
-
-buffer_percent = st.sidebar.slider(
-    "Sicherheits-Puffer (%)",
-    min_value=0,
-    max_value=50,
-    value=10,
-    step=1
-)
-
-# --- MATHEMATICAL AGGREGATION ENGINE ---
-def compute_budget(df, mode, k, buffer):
-    if df.empty:
-        return pd.DataFrame(), 0.0, 0.0
-
-    df_sorted = df.sort_values("date").copy()
+st.sidebar.header("Neuer Tankvorgang")
+with st.sidebar.form("add_transaction_form", clear_on_submit=True):
+    new_date = st.date_input("Datum", value=datetime.today())
+    new_amount = st.number_input("Gesamtbetrag (€)", min_value=0.0, step=0.01, format="%.2f")
+    new_km = st.number_input("Kilometerstand", min_value=0, step=1)
+    new_ppl = st.number_input("Preis pro Liter (€)", min_value=0.0, step=0.001, format="%.3f")
     
-    # 1. Weekly Grouping (Monday to Sunday)
-    df_sorted["year_week"] = df_sorted["date"].dt.to_period("W-SUN")
-    weekly_aggregated = df_sorted.groupby("year_week")["amount"].sum().reset_index()
-    weekly_aggregated.rename(columns={"amount": "actual"}, inplace=True)
+    submitted = st.form_submit_button("Transaktion speichern")
+    
+    if submitted:
+        if new_ppl > 0 and new_amount > 0:
+            calc_liters = round(new_amount / new_ppl, 2)
+            
+            # Neue Transaktion direkt in Supabase speichern
+            st_supabase.table("transactions").insert([{
+                "date": str(new_date),
+                "amount": float(new_amount),
+                "km": int(new_km),
+                "price_per_liter": float(new_ppl),
+                "liters": float(calc_liters)
+            }]).execute()
+            
+            st.success("Erfolgreich in der Cloud gespeichert!")
+            st.rerun()
+        else:
+            st.error("Bitte erst alle Felder gültig ausfüllen.")
 
-    # 2. Reindex to fill missing weeks with 0.00 €
-    full_period_range = pd.period_range(
-        start=weekly_aggregated["year_week"].min(),
-        end=weekly_aggregated["year_week"].max(),
-        freq="W-SUN"
-    )
-    weekly_full = weekly_aggregated.set_index("year_week").reindex(full_period_range, fill_value=0.0).reset_index()
-    weekly_full.rename(columns={"index": "year_week"}, inplace=True)
-    weekly_full["kw_label"] = weekly_full["year_week"].astype(str)
+# --- BERECHNUNG DER PROGNOSEMODELLE ---
+amounts = df["amount"]
+n_samples = len(amounts)
 
-    actual_series = weekly_full["actual"].values
-    n_weeks = len(actual_series)
-    budget_base = np.zeros(n_weeks)
+# Gleitende Durchschnitte (Window = 4)
+window = min(n_samples, 4)
 
-    # 3. Model Calculations
-    if mode == "SMA":
-        for i in range(n_weeks):
-            budget_base[i] = np.mean(actual_series[:i+1])
-        next_week_base = np.mean(actual_series)
+# 1. Simple Moving Average (SMA)
+sma = amounts.rolling(window=window).mean().iloc[-1]
 
-    elif mode == "WMA":
-        for i in range(n_weeks):
-            weights = np.arange(1, i + 2)
-            budget_base[i] = np.sum(actual_series[:i+1] * weights) / np.sum(weights)
-        weights_all = np.arange(1, n_weeks + 1)
-        next_week_base = np.sum(actual_series * weights_all) / np.sum(weights_all)
+# 2. Weighted Moving Average (WMA)
+weights = np.arange(1, window + 1)
+wma = np.average(amounts.tail(window), weights=weights)
 
-    elif mode == "EMA":
-        initial_sma = np.mean(actual_series)
-        running_ema = initial_sma
-        for i in range(n_weeks):
-            if i == 0:
-                running_ema = initial_sma
-            else:
-                running_ema = (k * actual_series[i]) + ((1 - k) * running_ema)
-            budget_base[i] = running_ema
-        next_week_base = (k * actual_series[-1]) + ((1 - k) * budget_base[-1])
+# 3. Exponential Moving Average (EMA)
+ema = amounts.ewm(span=window, adjust=False).mean().iloc[-1]
 
-    # 4. Apply Buffer & Skimmed Calculations
-    weekly_full["budget_base"] = budget_base
-    weekly_full["budget_buffered"] = budget_base * (1 + buffer / 100.0)
-    weekly_full["skimmed"] = np.maximum(0.0, weekly_full["budget_buffered"] - weekly_full["actual"])
+# Kombinierte Basis-Prognose
+base_forecast = (sma + wma + ema) / 3
 
-    next_week_budget = next_week_base * (1 + buffer / 100.0)
-    total_skimmed = weekly_full["skimmed"].sum()
+# Einstellbarer Sicherheitspuffer in der Sidebar
+st.sidebar.markdown("---")
+st.sidebar.header("Prognose-Parameter")
+buffer_pct = st.sidebar.slider("Sicherheitspuffer (%)", min_value=0, max_value=20, value=5, step=1)
 
-    return weekly_full, next_week_budget, total_skimmed
+final_weekly_forecast = base_forecast * (1 + buffer_pct / 100.0)
+final_monthly_projection = (final_weekly_forecast * 52) / 12
 
-weekly_df, next_budget, total_skimmed = compute_budget(
-    transactions_df, calc_mode, k_factor, buffer_percent
-)
-
-# --- DASHBOARD METRICS ---
+# --- DASHBOARD METRIKEN ---
 col1, col2, col3 = st.columns(3)
-
-# Hochrechnung der monatlichen Kosten: Wochenbudget * 52 Wochen / 12 Monate
-monthly_budget = (next_budget * 52) / 12
 
 with col1:
     st.metric(
-        label="Budget Kommende KW (inkl. Puffer)",
-        value=f"{next_budget:.2f} €",
-        delta=f"+{buffer_percent}% Puffer"
+        label="Budget Kommende KW",
+        value=f"{final_weekly_forecast:.2f} €",
+        delta=f"+{buffer_pct}% Puffer" if buffer_pct > 0 else "Kein Puffer"
     )
 
 with col2:
     st.metric(
-        label="Kosten pro Monat (Hochrechnung)",
-        value=f"{monthly_budget:.2f} €",
-        delta="Basis: (KW-Budget × 52) / 12"
+        label="Hochrechnung / Monat",
+        value=f"{final_monthly_projection:.2f} €"
     )
 
 with col3:
-    total_sum = transactions_df["amount"].sum() if not transactions_df.empty else 0.0
     st.metric(
-        label="Erfasste Wochen / Gesamtausgaben",
-        value=f"{len(weekly_df)} KW",
-        delta=f"{total_sum:.2f} € Gesamt"
+        label="Gesamtausgaben",
+        value=f"{amounts.sum():.2f} €",
+        delta=f"{n_samples} Tankungen"
     )
 
-st.markdown("---")
+# --- VISUALISIERUNG (PLOTLY CHART) ---
+st.markdown("### Ausgabenverlauf & Prognosemodelle")
 
-# --- CHART SECTION ---
-st.subheader("Wöchentlicher Ausgaben- & Budgetverlauf")
+fig = go.Figure()
 
-if not weekly_df.empty:
-    fig = bg.Figure()
+# Reale Ausgaben
+fig.add_trace(go.Scatter(
+    x=df["date"], 
+    y=df["amount"],
+    mode="lines+markers",
+    name="Reale Ausgaben (€)",
+    line=dict(color="#38bdf8", width=3),
+    marker=dict(size=6)
+))
 
-    # Actual Expenses Line
-    fig.add_trace(bg.Scatter(
-        x=weekly_df["kw_label"],
-        y=weekly_df["actual"],
-        mode="lines+markers",
-        name="Reale Ausgaben",
-        line=dict(color="#94a3b8", width=2, dash="dash")
-    ))
+# SMA Linie
+df["SMA"] = amounts.rolling(window=window).mean()
+fig.add_trace(go.Scatter(
+    x=df["date"], 
+    y=df["SMA"],
+    mode="lines",
+    name="SMA (Gleitender Durchschnitt)",
+    line=dict(color="#f59e0b", width=1.5, dash="dash")
+))
 
-    # Buffered Budget Line
-    fig.add_trace(bg.Scatter(
-        x=weekly_df["kw_label"],
-        y=weekly_df["budget_buffered"],
-        mode="lines+markers",
-        name=f"Budget ({calc_mode})",
-        line=dict(color="#10b981", width=3)
-    ))
+fig.update_layout(
+    template="plotly_dark",
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
+    margin=dict(l=20, r=20, t=30, b=20),
+    xaxis=dict(title="Datum", gridcolor="#1e293b"),
+    yaxis=dict(title="Betrag (€)", gridcolor="#1e293b"),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+)
 
-    fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor="#0f172a",
-        plot_bgcolor="#0f172a",
-        margin=dict(l=20, r=20, t=30, b=20),
-        xaxis_title="Kalenderwoche",
-        yaxis_title="Betrag (€)",
-        hovermode="x unified"
-    )
+st.plotly_chart(fig, use_container_width=True)
 
-    st.plotly_chart(fig, use_container_width=True)
-
-# --- INPUT FORM & TRANSACTION LIST ---
-col_form, col_list = st.columns([1, 2])
-
-with col_form:
-    st.subheader("Neues Tank-Ereignis")
-    with st.form("add_tx_form", clear_on_submit=True):
-        new_date = st.date_input("Datum", datetime.now())
-        new_amount = st.number_input("Betrag (€)", min_value=0.01, step=0.01, format="%.2f")
-        new_location = st.text_input("Tankstelle / Ort", placeholder="z. B. JET Tankstelle")
-        submit_btn = st.form_submit_button("Transaktion Speichern")
-
-        if submit_btn:
-            payload = {
-                "date": str(new_date),
-                "amount": float(new_amount),
-                "location": new_location.strip() or "Tankstelle"
-            }
-            supabase.table("transactions").insert(payload).execute()
-            st.success("Erfolgreich in Supabase gespeichert!")
-            st.rerun()
-
-with col_list:
-    st.subheader("Transaktions-Historie")
-    if not transactions_df.empty:
-        display_df = transactions_df.sort_values("date", ascending=False).copy()
-        display_df["date"] = display_df["date"].dt.strftime("%d.%m.%Y")
-        display_df["amount"] = display_df["amount"].map("{:.2f} €".format)
-        
-        cols_to_show = [col for col in ["date", "amount", "location"] if col in display_df.columns]
-        display_df = display_df[cols_to_show]
-        display_df.rename(columns={"date": "Datum", "amount": "Betrag", "location": "Tankstelle"}, inplace=True)
-        
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            hide_index=True,
-            height=300
-        )
-    else:
-        st.info("Noch keine Transaktionen in Supabase vorhanden.")
+# --- HISTORIE TABELLE ---
+st.markdown("### Historie aller Transaktionen")
+st.dataframe(
+    df[["date", "amount", "km", "price_per_liter", "liters"]].sort_values("date", ascending=False),
+    use_container_width=True,
+    column_config={
+        "date": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
+        "amount": st.column_config.NumberColumn("Gesamtbetrag", format="%.2f €"),
+        "km": st.column_config.NumberColumn("Kilometerstand", format="%d km"),
+        "price_per_liter": st.column_config.NumberColumn("Preis / Liter", format="%.3f €"),
+        "liters": st.column_config.NumberColumn("Liter", format="%.2f L")
+    }
+)
