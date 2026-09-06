@@ -102,7 +102,7 @@ if submitted:
             
             st.success("Erfolgreich in der Cloud gespeichert!")
             st.rerun()
-        else:
+     else:
             st.error("Bitte erst alle Felder gültig ausfüllen.")
 
 # --- BERECHNUNG DER PROGNOSEMODELLE ---
