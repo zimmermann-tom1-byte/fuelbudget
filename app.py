@@ -93,6 +93,8 @@ with st.sidebar.form("add_transaction_form", clear_on_submit=True):
     submitted = st.form_submit_button("Transaktion speichern")
             
 # Neue Transaktion direkt in Supabase speichern
+if submitted:
+    if new_amount > 0:
             st_supabase.table("transactions").insert([{
                 "date": str(new_date),
                 "amount": float(new_amount),
