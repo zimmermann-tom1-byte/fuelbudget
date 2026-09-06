@@ -90,9 +90,6 @@ st.sidebar.header("Neuer Tankvorgang")
 with st.sidebar.form("add_transaction_form", clear_on_submit=True):
     new_date = st.date_input("Datum", value=datetime.today())
     new_amount = st.number_input("Gesamtbetrag (€)", min_value=0.0, step=0.01, format="%.2f")
-    new_km = st.number_input("Kilometerstand", min_value=0, step=1)
-    new_ppl = st.number_input("Preis pro Liter (€)", min_value=0.0, step=0.001, format="%.3f")
-    
     submitted = st.form_submit_button("Transaktion speichern")
     
     if submitted:
@@ -103,9 +100,6 @@ with st.sidebar.form("add_transaction_form", clear_on_submit=True):
             st_supabase.table("transactions").insert([{
                 "date": str(new_date),
                 "amount": float(new_amount),
-                "km": int(new_km),
-                "price_per_liter": float(new_ppl),
-                "liters": float(calc_liters)
             }]).execute()
             
             st.success("Erfolgreich in der Cloud gespeichert!")
@@ -204,13 +198,10 @@ st.plotly_chart(fig, use_container_width=True)
 # --- HISTORIE TABELLE ---
 st.markdown("### Historie aller Transaktionen")
 st.dataframe(
-    df[["date", "amount", "km", "price_per_liter", "liters"]].sort_values("date", ascending=False),
+    df[["date", "amount"]].sort_values("date", ascending=False),
     use_container_width=True,
     column_config={
         "date": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
-        "amount": st.column_config.NumberColumn("Gesamtbetrag", format="%.2f €"),
-        "km": st.column_config.NumberColumn("Kilometerstand", format="%d km"),
-        "price_per_liter": st.column_config.NumberColumn("Preis / Liter", format="%.3f €"),
-        "liters": st.column_config.NumberColumn("Liter", format="%.2f L")
+        "amount": st.column_config.NumberColumn("Gesamtbetrag", format="%.2f €")
     }
 )
