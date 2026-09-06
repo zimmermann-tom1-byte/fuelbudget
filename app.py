@@ -91,10 +91,6 @@ with st.sidebar.form("add_transaction_form", clear_on_submit=True):
     new_date = st.date_input("Datum", value=datetime.today())
     new_amount = st.number_input("Gesamtbetrag (€)", min_value=0.0, step=0.01, format="%.2f")
     submitted = st.form_submit_button("Transaktion speichern")
-    
-    if submitted:
-        if new_ppl > 0 and new_amount > 0:
-            calc_liters = round(new_amount / new_ppl, 2)
             
             # Neue Transaktion direkt in Supabase speichern
             st_supabase.table("transactions").insert([{
