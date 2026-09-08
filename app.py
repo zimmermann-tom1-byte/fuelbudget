@@ -1,121 +1,205 @@
-"""
-FuelBudget - Minimalversion (Schritt 1)
-Berechnet SMA-, WMA- und EMA-Budget (+10% Puffer) fuer die Folgewoche
-auf Basis wochenweise aggregierter Tankausgaben.
-"""
-
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
 from datetime import datetime
+from st_supabase_connection import SupabaseConnection
 
-K = 0.15          # Glaettungsfaktor fuer EMA
-PUFFER = 0.10      # 10% Sicherheitspuffer
-KW_START, KW_END = 7, 33   # Betrachteter Wochenbereich (KW 07 - KW 33)
+# --- PAGE CONFIGURATION ---
+st.set_page_config(
+    page_title="FuelBudget",
+    page_icon="⛽",
+    layout="wide"
+)
 
-# ---------------------------------------------------------------------------
-# 1. Datenbasis
-# ---------------------------------------------------------------------------
-TRANSAKTIONEN = [
-    {"date": "11.02.2026", "amount": 34.39},
-    {"date": "13.02.2026", "amount": 26.99},
-    {"date": "17.02.2026", "amount": 57.40},
-    {"date": "22.02.2026", "amount": 3.54},
-    {"date": "27.02.2026", "amount": 9.90},
-    {"date": "28.02.2026", "amount": 57.25},
-    {"date": "28.02.2026", "amount": 20.15},
-    {"date": "04.03.2026", "amount": 29.72},
-    {"date": "09.03.2026", "amount": 57.03},
-    {"date": "15.03.2026", "amount": 46.77},
-    {"date": "22.03.2026", "amount": 30.01},
-    {"date": "27.03.2026", "amount": 86.79},
-    {"date": "05.04.2026", "amount": 62.92},
-    {"date": "10.04.2026", "amount": 4.49},
-    {"date": "12.04.2026", "amount": 5.25},
-    {"date": "12.04.2026", "amount": 3.99},
-    {"date": "17.04.2026", "amount": 57.89},
-    {"date": "29.04.2026", "amount": 71.83},
-    {"date": "30.04.2026", "amount": 3.74},
-    {"date": "06.05.2026", "amount": 36.11},
-    {"date": "08.05.2026", "amount": 26.35},
-    {"date": "16.05.2026", "amount": 61.09},
-    {"date": "27.05.2026", "amount": 68.25},
-    {"date": "07.06.2026", "amount": 30.33},
-    {"date": "10.06.2026", "amount": 16.08},
-    {"date": "15.06.2026", "amount": 49.95},
-    {"date": "17.06.2026", "amount": 16.01},
-    {"date": "27.06.2026", "amount": 63.63},
-    {"date": "30.06.2026", "amount": 64.81},
-    {"date": "03.07.2026", "amount": 26.88},
-    {"date": "05.07.2026", "amount": 5.23},
-    {"date": "13.07.2026", "amount": 73.39},
-    {"date": "20.07.2026", "amount": 50.00},
-    {"date": "30.07.2026", "amount": 69.70},
-    {"date": "01.08.2026", "amount": 39.84},
-    {"date": "12.08.2026", "amount": 60.97},
-    {"date": "19.08.2026", "amount": 46.50},
-    {"date": "02.09.2026", "amount": 69.18},
+# Custom Dark Theme Styling
+st.markdown("""
+<style>
+    .main { background-color: #020617; color: #f8fafc; }
+    .stMetric { background-color: #0f172a; border: 1px solid #1e293b; padding: 15px; border-radius: 12px; }
+    div[data-testid="stForm"] { background-color: #0f172a; border: 1px solid #1e293b; }
+    div[data-testid="stDataFrame"] { background-colour: #0f172a; border-radius: 12px; }
+</style>
+""", unsafe_allow_html=True)
+
+# --- SUPABASE DATABASE CONNECTION ---
+from supabase import create_client
+
+url = st.secrets["SUPABASE_URL"]
+key = st.secrets["SUPABASE_KEY"]
+st_supabase = create_client(url, key)
+
+def load_data():
+    response = st_supabase.table("transactions").select("*").execute()
+    df = pd.DataFrame(response.data)
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date", ascending=False).reset_index(drop=True)
+    return df
+
+df = load_data()
+
+# --- INITIAL DATA SEEDING (falls Datenbank leer ist) ---
+if df.empty:
+    initial_data = [
+    {"date": "2026-02-11", "amount": 34.39, "location": "SB Tank 9893"},
+    {"date": "2026-02-13", "amount": 26.99, "location": "SB Tank 9893"},
+    {"date": "2026-02-17", "amount": 57.40, "location": "JET Tankstelle"},
+    {"date": "2026-02-22", "amount": 3.54, "location": "Aral"},
+    {"date": "2026-02-27", "amount": 9.90, "location": "SB Tank 9893"},
+    {"date": "2026-02-28", "amount": 57.25, "location": "TANKSTELLE P. BECKER"},
+    {"date": "2026-02-28", "amount": 20.15, "location": "TANKSTELLE P. BECKER"},
+    {"date": "2026-03-04", "amount": 29.72, "location": "AVIA"},
+    {"date": "2026-03-09", "amount": 57.03, "location": "JET Tankstelle"},
+    {"date": "2026-03-15", "amount": 46.77, "location": "AVIA"},
+    {"date": "2026-03-22", "amount": 30.01, "location": "JET Tankstelle"},
+    {"date": "2026-03-27", "amount": 86.79, "location": "TANKSTELLE P. BECKER"},
+    {"date": "2026-04-05", "amount": 62.92, "location": "JET Tankstelle"},
+    {"date": "2026-04-10", "amount": 4.49, "location": "DE PANJERD"},
+    {"date": "2026-04-12", "amount": 5.25, "location": "TotalEnergies"},
+    {"date": "2026-04-12", "amount": 3.99, "location": "Esso"},
+    {"date": "2026-04-17", "amount": 57.89, "location": "TANKSTELLE P. BECKER"},
+    {"date": "2026-04-29", "amount": 71.83, "location": "CALPAM TANKAUTOMAT"},
+    {"date": "2026-04-30", "amount": 3.74, "location": "Aral"},
+    {"date": "2026-05-06", "amount": 36.11, "location": "CALPAM TANKAUTOMAT"},
+    {"date": "2026-05-08", "amount": 26.35, "location": "SB Tank 9893"},
+    {"date": "2026-05-16", "amount": 61.09, "location": "Raiffeisen Westfalen Mitte"},
+    {"date": "2026-05-27", "amount": 68.25, "location": "SB Tank 9893"},
+    {"date": "2026-06-07", "amount": 30.33, "location": "TANKSTELLE P. BECKER"},
+    {"date": "2026-06-10", "amount": 16.08, "location": "JET Tankstelle"},
+    {"date": "2026-06-15", "amount": 49.95, "location": "JET Tankstelle"},
+    {"date": "2026-06-17", "amount": 16.01, "location": "SB Tank 9893"},
+    {"date": "2026-06-27", "amount": 63.63, "location": "CALPAM TANKAUTOMAT"},
+    {"date": "2026-06-30", "amount": 64.81, "location": "SB Tank 9893"},
+    {"date": "2026-07-03", "amount": 26.88, "location": "CALPAM TANKAUTOMAT"},
+    {"date": "2026-07-05", "amount": 5.23, "location": "JET Tankstelle"},
+    {"date": "2026-07-13", "amount": 73.39, "location": "Tankstelle"},
+    {"date": "2026-07-20", "amount": 50.00, "location": "Tankstelle"},
+    {"date": "2026-07-30", "amount": 69.70, "location": "Tankstelle"},
+    {"date": "2026-08-01", "amount": 39.84, "location": "Tankstelle"},
+    {"date": "2026-08-12", "amount": 60.97, "location": "Tankstelle"}
 ]
+    st_supabase.table("transactions").insert(initial_data).execute()
+    df = load_data()
 
+# --- HEADER & SIDEBAR ---
+st.title("FuelBudget 🚗⛽")
+st.caption("Präzise Kraftstoffbudgetierung & Verbrauchsanalyse")
 
-# ---------------------------------------------------------------------------
-# 2. Wochen-Aggregation (Montag-Sonntag, KW 07 - KW 33)
-# ---------------------------------------------------------------------------
-def aggregiere_wochen(transaktionen, kw_start, kw_end):
-    summen = {kw: 0.0 for kw in range(kw_start, kw_end + 1)}
-    for t in transaktionen:
-        try:
-            datum = datetime.strptime(t["date"], "%d.%m.%Y")
-            betrag = float(t["amount"])
-        except (ValueError, KeyError, TypeError):
-            continue  # defensiv: fehlerhafte Eintraege ueberspringen
-        kw = datum.isocalendar()[1]
-        if kw_start <= kw <= kw_end:
-            summen[kw] += betrag
-    # geordnete Liste KW07..KW33
-    return [round(summen[kw], 2) for kw in range(kw_start, kw_end + 1)]
+st.sidebar.header("Neuer Tankvorgang")
+with st.sidebar.form("add_transaction_form", clear_on_submit=True):
+    new_date = st.date_input("Datum", value=datetime.today())
+    new_amount = st.number_input("Gesamtbetrag (€)", min_value=0.0, step=0.01, format="%.2f")
+    submitted = st.form_submit_button("Transaktion speichern")
+            
+# Neue Transaktion direkt in Supabase speichern
+if submitted:
+    if new_amount > 0:
+        st_supabase.table("transactions").insert([{
+            "date": str(new_date),
+            "amount": float(new_amount),
+        }]).execute()
+            
+        st.success("Erfolgreich in der Cloud gespeichert!")
+        st.rerun()
+    else:
+        st.error("Bitte erst alle Felder gültig ausfüllen.")
 
+# --- BERECHNUNG DER PROGNOSEMODELLE ---
+amounts = df["amount"]
+n_samples = len(amounts)
 
-# ---------------------------------------------------------------------------
-# 3. Berechnungslogik
-# ---------------------------------------------------------------------------
-def berechne_sma(wochenwerte):
-    return sum(wochenwerte) / len(wochenwerte)
+# Gleitende Durchschnitte (Window = 4)
+window = min(n_samples, 4)
 
+# 1. Simple Moving Average (SMA)
+sma = amounts.rolling(window=window).mean().iloc[-1]
 
-def berechne_wma(wochenwerte):
-    n = len(wochenwerte)
-    gewichte = range(1, n + 1)  # aelteste=1, neueste=n
-    zaehler = sum(w * g for w, g in zip(wochenwerte, gewichte))
-    nenner = sum(gewichte)
-    return zaehler / nenner
+# 2. Weighted Moving Average (WMA)
+weights = np.arange(1, window + 1)
+wma = np.average(amounts.tail(window), weights=weights)
 
+# 3. Exponential Moving Average (EMA)
+ema = amounts.ewm(span=window, adjust=False).mean().iloc[-1]
 
-def berechne_ema(wochenwerte, k):
-    budget = berechne_sma(wochenwerte)  # Startwert = SMA
-    for ausgabe in wochenwerte:
-        budget = (k * ausgabe) + ((1 - k) * budget)
-    return budget
+# Kombinierte Basis-Prognose
+base_forecast = (sma + wma + ema) / 3
 
+# Einstellbarer Sicherheitspuffer in der Sidebar
+st.sidebar.markdown("---")
+st.sidebar.header("Prognose-Parameter")
+buffer_pct = st.sidebar.slider("Sicherheitspuffer (%)", min_value=0, max_value=20, value=5, step=1)
 
-# ---------------------------------------------------------------------------
-# 4. Ausgabe
-# ---------------------------------------------------------------------------
-def main():
-    wochenwerte = aggregiere_wochen(TRANSAKTIONEN, KW_START, KW_END)
-    naechste_kw = KW_END + 1
+final_weekly_forecast = base_forecast * (1 + buffer_pct / 100.0)
+final_monthly_projection = (final_weekly_forecast * 52) / 12
 
-    sma = berechne_sma(wochenwerte)
-    wma = berechne_wma(wochenwerte)
-    ema = berechne_ema(wochenwerte, K)
+# --- DASHBOARD METRIKEN ---
+col1, col2, col3 = st.columns(3)
 
-    sma_budget = sma * (1 + PUFFER)
-    wma_budget = wma * (1 + PUFFER)
-    ema_budget = ema * (1 + PUFFER)
+with col1:
+    st.metric(
+        label="Budget Kommende KW",
+        value=f"{final_weekly_forecast:.2f} €",
+        delta=f"+{buffer_pct}% Puffer" if buffer_pct > 0 else "Kein Puffer"
+    )
 
-    print(f"Analysierte Wochen: KW{KW_START:02d}-KW{KW_END:02d} ({len(wochenwerte)} Wochen)")
-    print(f"Budget fuer KW{naechste_kw:02d} (inkl. {int(PUFFER*100)}% Puffer):\n")
-    print(f"  SMA-Budget: {sma_budget:>7.2f} EUR   (Rohwert: {sma:6.2f} EUR)")
-    print(f"  WMA-Budget: {wma_budget:>7.2f} EUR   (Rohwert: {wma:6.2f} EUR)")
-    print(f"  EMA-Budget: {ema_budget:>7.2f} EUR   (Rohwert: {ema:6.2f} EUR, K={K})")
+with col2:
+    st.metric(
+        label="Hochrechnung / Monat",
+        value=f"{final_monthly_projection:.2f} €"
+    )
 
+with col3:
+    st.metric(
+        label="Gesamtausgaben",
+        value=f"{amounts.sum():.2f} €",
+        delta=f"{n_samples} Tankungen"
+    )
 
-if __name__ == "__main__":
-    main()
+# --- VISUALISIERUNG (PLOTLY CHART) ---
+st.markdown("### Ausgabenverlauf & Prognosemodelle")
+
+fig = go.Figure()
+
+# Reale Ausgaben
+fig.add_trace(go.Scatter(
+    x=df["date"], 
+    y=df["amount"],
+    mode="lines+markers",
+    name="Reale Ausgaben (€)",
+    line=dict(color="#38bdf8", width=3),
+    marker=dict(size=6)
+))
+
+# SMA Linie
+df["SMA"] = amounts.rolling(window=window).mean()
+fig.add_trace(go.Scatter(
+    x=df["date"], 
+    y=df["SMA"],
+    mode="lines",
+    name="SMA (Gleitender Durchschnitt)",
+    line=dict(color="#f59e0b", width=1.5, dash="dash")
+))
+
+fig.update_layout(
+    template="plotly_dark",
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
+    margin=dict(l=20, r=20, t=30, b=20),
+    xaxis=dict(title="Datum", gridcolor="#1e293b"),
+    yaxis=dict(title="Betrag (€)", gridcolor="#1e293b"),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+)
+
+st.plotly_chart(fig, use_container_width=True)
+
+# --- HISTORIE TABELLE ---
+st.markdown("### Historie aller Transaktionen")
+st.dataframe(
+    df[["date", "amount"]].sort_values("date", ascending=False),
+    use_container_width=True,
+    column_config={
+        "date": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
+        "amount": st.column_config.NumberColumn("Gesamtbetrag", format="%.2f €")
+    }
+)
