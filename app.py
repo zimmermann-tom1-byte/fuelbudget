@@ -105,8 +105,8 @@ if submitted:
 amounts = df.sort_values("date", ascending=True)["amount"].reset_index(drop=True)
 n_samples = len(amounts)
 
-# Gleitende Durchschnitte (Window = 4)
-window = min(n_samples, 4)
+# Alle bisherigen Transaktionen einbeziehen (kein festes Mini-Fenster mehr)
+window = n_samples
 
 # 1. Simple Moving Average (SMA)
 sma = amounts.rolling(window=window).mean().iloc[-1]
@@ -115,8 +115,9 @@ sma = amounts.rolling(window=window).mean().iloc[-1]
 weights = np.arange(1, window + 1)
 wma = np.average(amounts.tail(window), weights=weights)
 
-# 3. Exponential Moving Average (EMA)
-ema = amounts.ewm(span=window, adjust=False).mean().iloc[-1]
+# 3. Exponential Moving Average (EMA) - fester Glaettungsfaktor, unabhaengig von der Datenmenge
+K = 0.15
+ema = amounts.ewm(alpha=K, adjust=False).mean().iloc[-1]
 
 # Kombinierte Basis-Prognose
 base_forecast = (sma + wma + ema) / 3
