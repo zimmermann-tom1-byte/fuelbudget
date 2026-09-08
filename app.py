@@ -76,8 +76,8 @@ if df.empty:
     {"date": "2026-08-19", "amount": 46.50, "location": "Tankstelle"},
     {"date": "2026-09-02", "amount": 69.18, "location": "Tankstelle"}
 ]
-   st.session_state.transactions = initial_data
-    df = load_data()
+st.session_state.transactions = initial_data
+df = load_data()
 
 # --- HEADER & SIDEBAR ---
 st.title("FuelBudget 🚗⛽")
