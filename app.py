@@ -101,6 +101,13 @@ if submitted:
     else:
         st.error("Bitte erst alle Felder gültig ausfüllen.")
 
+# --- PROGNOSE-PARAMETER (Sidebar) ---
+st.sidebar.markdown("---")
+st.sidebar.header("Prognose-Parameter")
+mode = st.sidebar.selectbox("Berechnungsmodus", ["EMA", "SMA", "WMA"], index=0)
+k_factor = st.sidebar.slider("Glättungsfaktor K (nur EMA)", min_value=0.01, max_value=1.0, value=0.15, step=0.01)
+buffer_pct = st.sidebar.slider("Sicherheitspuffer (%)", min_value=0, max_value=100, value=10, step=1)
+
 # --- BERECHNUNG DER PROGNOSEMODELLE ---
 amounts = df.sort_values("date", ascending=True)["amount"].reset_index(drop=True)
 n_samples = len(amounts)
@@ -115,17 +122,16 @@ sma = amounts.rolling(window=window).mean().iloc[-1]
 weights = np.arange(1, window + 1)
 wma = np.average(amounts.tail(window), weights=weights)
 
-# 3. Exponential Moving Average (EMA) - fester Glaettungsfaktor, unabhaengig von der Datenmenge
-K = 0.15
-ema = amounts.ewm(alpha=K, adjust=False).mean().iloc[-1]
+# 3. Exponential Moving Average (EMA) - Glaettungsfaktor ueber Slider einstellbar
+ema = amounts.ewm(alpha=k_factor, adjust=False).mean().iloc[-1]
 
-# Kombinierte Basis-Prognose
-base_forecast = (sma + wma + ema) / 3
-
-# Einstellbarer Sicherheitspuffer in der Sidebar
-st.sidebar.markdown("---")
-st.sidebar.header("Prognose-Parameter")
-buffer_pct = st.sidebar.slider("Sicherheitspuffer (%)", min_value=0, max_value=20, value=5, step=1)
+# Prognose je nach gewaehltem Modus
+if mode == "SMA":
+    base_forecast = sma
+elif mode == "WMA":
+    base_forecast = wma
+else:
+    base_forecast = ema
 
 final_weekly_forecast = base_forecast * (1 + buffer_pct / 100.0)
 final_monthly_projection = (final_weekly_forecast * 52) / 12
@@ -135,7 +141,7 @@ col1, col2, col3 = st.columns(3)
 
 with col1:
     st.metric(
-        label="Budget Kommende KW",
+        label=f"Budget Kommende KW" ({mode})",
         value=f"{final_weekly_forecast:.2f} €",
         delta=f"+{buffer_pct}% Puffer" if buffer_pct > 0 else "Kein Puffer"
     )
