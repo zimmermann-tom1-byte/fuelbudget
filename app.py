@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
-from st_supabase_connection import SupabaseConnection
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -22,20 +21,16 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- SUPABASE DATABASE CONNECTION ---
-from supabase import create_client
-
-url = st.secrets["SUPABASE_URL"]
-key = st.secrets["SUPABASE_KEY"]
-st_supabase = create_client(url, key)
-
 def load_data():
-    response = st_supabase.table("transactions").select("*").execute()
-    df = pd.DataFrame(response.data)
+    df = pd.DataFrame(st.session_state.transactions)
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date", ascending=False).reset_index(drop=True)
     return df
+
+# --- LOKALER DATENSPEICHER (Platzhalter, bis Supabase wieder angebunden ist) ---
+if "transactions" not in st.session_state:
+    st.session_state.transactions = []
 
 df = load_data()
 
@@ -77,9 +72,11 @@ if df.empty:
     {"date": "2026-07-20", "amount": 50.00, "location": "Tankstelle"},
     {"date": "2026-07-30", "amount": 69.70, "location": "Tankstelle"},
     {"date": "2026-08-01", "amount": 39.84, "location": "Tankstelle"},
-    {"date": "2026-08-12", "amount": 60.97, "location": "Tankstelle"}
+    {"date": "2026-08-12", "amount": 60.97, "location": "Tankstelle"},
+    {"date": "2026-08-19", "amount": 46.50, "location": "Tankstelle"},
+    {"date": "2026-09-02", "amount": 69.18, "location": "Tankstelle"}
 ]
-    st_supabase.table("transactions").insert(initial_data).execute()
+   st.session_state.transactions = initial_data
     df = load_data()
 
 # --- HEADER & SIDEBAR ---
@@ -95,12 +92,11 @@ with st.sidebar.form("add_transaction_form", clear_on_submit=True):
 # Neue Transaktion direkt in Supabase speichern
 if submitted:
     if new_amount > 0:
-        st_supabase.table("transactions").insert([{
+        st.session_state.transactions.append({
             "date": str(new_date),
             "amount": float(new_amount),
-        }]).execute()
-            
-        st.success("Erfolgreich in der Cloud gespeichert!")
+        })
+        st.success("Transaktion gespeichert (nur für diese Sitzung, noch nicht dauerhaft).")
         st.rerun()
     else:
         st.error("Bitte erst alle Felder gültig ausfüllen.")
