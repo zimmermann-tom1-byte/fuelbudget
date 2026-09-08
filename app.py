@@ -102,7 +102,7 @@ if submitted:
         st.error("Bitte erst alle Felder gültig ausfüllen.")
 
 # --- BERECHNUNG DER PROGNOSEMODELLE ---
-amounts = df.sort_values("date, ascending=True)["amount"].reset_index(drop=True)
+amounts = df.sort_values("date", ascending=True)["amount"].reset_index(drop=True)
 n_samples = len(amounts)
 
 # Gleitende Durchschnitte (Window = 4)
