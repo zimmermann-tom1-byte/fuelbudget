@@ -141,7 +141,7 @@ col1, col2, col3 = st.columns(3)
 
 with col1:
     st.metric(
-        label=f"Budget Kommende KW" ({mode})",
+        label=f"Budget Kommende KW ({mode})",
         value=f"{final_weekly_forecast:.2f} €",
         delta=f"+{buffer_pct}% Puffer" if buffer_pct > 0 else "Kein Puffer"
     )
