@@ -33,8 +33,12 @@ def load_data():
 if "transactions" not in st.session_state:
     st.session_state.transactions = []
 
-df = load_data()
+# Absicherung: aeltere Eintraege ohne "id" (aus frueheren Versionen) nachtraeglich ergaenzen
+for t in st.session_state.transactions:
+    if "id" not in t:
+        t["id"] = str(uuid.uuid4())
 
+df = load_data()
 # --- INITIAL DATA SEEDING (falls Datenbank leer ist) ---
 if df.empty:
     initial_data = [
@@ -73,7 +77,7 @@ if df.empty:
     ]
     for t in initial_data:
         t["id"] = str(uuid.uuid4())
-    t.session_state.transactions = initial_data
+    st.session_state.transactions = initial_data
     df = load_data()
 
 # --- HEADER & SIDEBAR ---
