@@ -89,7 +89,7 @@ with st.sidebar.form("add_transaction_form", clear_on_submit=True):
 # Neue Transaktion direkt in Supabase speichern
 if submitted:
     if new_amount > 0:
-st.session_state.transactions.append({
+        st.session_state.transactions.append({
             "id": str(uuid.uuid4()),
             "date": str(new_date),
             "amount": float(new_amount),
