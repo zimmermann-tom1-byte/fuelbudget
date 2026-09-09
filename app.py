@@ -100,7 +100,7 @@ st.sidebar.markdown("---")
 st.sidebar.header("Prognose-Parameter")
 mode = st.sidebar.selectbox("Berechnungsmodus", ["EMA", "SMA", "WMA"], index=0)
 k_factor = st.sidebar.slider("Glättungsfaktor K (nur EMA)", min_value=0.01, max_value=1.0, value=0.15, step=0.01)
-buffer_pct = st.sidebar.slider("Sicherheitspuffer (%)", min_value=0, max_value=100, value=10, step=1)
+buffer_pct = st.sidebar.slider("Sicherheitspuffer (%)", min_value=-10, max_value=100, value=10, step=1)
 
 # --- BERECHNUNG DER PROGNOSEMODELLE ---
 amounts = df.sort_values("date", ascending=True)["amount"].reset_index(drop=True)
@@ -137,13 +137,14 @@ with col1:
     st.metric(
         label=f"Budget Kommende KW ({mode})",
         value=f"{final_weekly_forecast:.2f} €",
-        delta=f"+{buffer_pct}% Puffer" if buffer_pct > 0 else "Kein Puffer"
+        delta=f"{buffer_pct:+d}% Puffer" if buffer_pct != 0 else "Kein Puffer"
     )
 
 with col2:
     st.metric(
-        label="Hochrechnung / Monat",
-        value=f"{final_monthly_projection:.2f} €"
+        label=f"Hochrechnung / Monat ({mode})",
+        value=f"{final_monthly_projection:.2f} €",
+        delta=f"{buffer_pct:+d}% Puffer" if buffer_pct != 0 else "Kein Puffer"
     )
 
 with col3:
