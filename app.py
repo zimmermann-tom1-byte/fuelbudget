@@ -71,9 +71,9 @@ if df.empty:
         {"date": "2026-08-19", "amount": 46.50, "location": "Tankstelle"},
         {"date": "2026-09-02", "amount": 69.18, "location": "Tankstelle"}
     ]
-for t in initial_data:
+    for t in initial_data:
         t["id"] = str(uuid.uuid4())
-    st.session_state.transactions = initial_data
+    t.session_state.transactions = initial_data
     df = load_data()
 
 # --- HEADER & SIDEBAR ---
