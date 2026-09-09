@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
+import uuid
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -70,6 +71,8 @@ if df.empty:
         {"date": "2026-08-19", "amount": 46.50, "location": "Tankstelle"},
         {"date": "2026-09-02", "amount": 69.18, "location": "Tankstelle"}
     ]
+for t in initial_data:
+        t["id"] = str(uuid.uuid4())
     st.session_state.transactions = initial_data
     df = load_data()
 
@@ -86,7 +89,8 @@ with st.sidebar.form("add_transaction_form", clear_on_submit=True):
 # Neue Transaktion direkt in Supabase speichern
 if submitted:
     if new_amount > 0:
-        st.session_state.transactions.append({
+st.session_state.transactions.append({
+            "id": str(uuid.uuid4()),
             "date": str(new_date),
             "amount": float(new_amount),
         })
@@ -191,39 +195,25 @@ fig.update_layout(
 
 st.plotly_chart(fig, use_container_width=True)
 
-# --- HISTORIE TABELLE ---
+# --- HISTORIE TABELLE MIT LÖSCH-BUTTON PRO ZEILE ---
 st.markdown("### Historie aller Transaktionen")
 
-history_df = df[["date", "amount"]].sort_values("date", ascending=False).reset_index(drop=True)
+history_df = df.sort_values("date", ascending=False).reset_index(drop=True)
 
-st.dataframe(
-    history_df,
-    use_container_width=True,
-    column_config={
-        "date": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
-        "amount": st.column_config.NumberColumn("Gesamtbetrag", format="%.2f €")
-    }
-)
-
-# --- TRANSAKTION LÖSCHEN ---
-st.markdown("#### Transaktion löschen")
-
-if not history_df.empty:
-    options = [
-        f"{row['date'].strftime('%d.%m.%Y')} – {row['amount']:.2f} €"
-        for _, row in history_df.iterrows()
-    ]
-    selected_label = st.selectbox("Transaktion auswählen", options)
-    selected_index = options.index(selected_label)
-    selected_date = history_df.iloc[selected_index]["date"]
-    selected_amount = history_df.iloc[selected_index]["amount"]
-
-    if st.button("Ausgewählte Transaktion löschen"):
-        for i, t in enumerate(st.session_state.transactions):
-            if pd.to_datetime(t["date"]) == selected_date and float(t["amount"]) == selected_amount:
-                del st.session_state.transactions[i]
-                break
-        st.success("Transaktion gelöscht.")
-        st.rerun()
-else:
+if history_df.empty:
     st.info("Keine Transaktionen vorhanden.")
+else:
+    header_col1, header_col2, header_col3 = st.columns([3, 2, 1])
+    header_col1.markdown("**Datum**")
+    header_col2.markdown("**Betrag**")
+    header_col3.markdown("**Löschen**")
+
+    for _, row in history_df.iterrows():
+        col1, col2, col3 = st.columns([3, 2, 1])
+        col1.write(row["date"].strftime("%d.%m.%Y"))
+        col2.write(f"{row['amount']:.2f} €")
+        if col3.button("🗑️", key=f"delete_{row['id']}"):
+            st.session_state.transactions = [
+                t for t in st.session_state.transactions if t["id"] != row["id"]
+            ]
+            st.rerun()
