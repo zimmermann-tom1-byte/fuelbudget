@@ -193,11 +193,37 @@ st.plotly_chart(fig, use_container_width=True)
 
 # --- HISTORIE TABELLE ---
 st.markdown("### Historie aller Transaktionen")
+
+history_df = df[["date", "amount"]].sort_values("date", ascending=False).reset_index(drop=True)
+
 st.dataframe(
-    df[["date", "amount"]].sort_values("date", ascending=False),
+    history_df,
     use_container_width=True,
     column_config={
         "date": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
         "amount": st.column_config.NumberColumn("Gesamtbetrag", format="%.2f €")
     }
 )
+
+# --- TRANSAKTION LÖSCHEN ---
+st.markdown("#### Transaktion löschen")
+
+if not history_df.empty:
+    options = [
+        f"{row['date'].strftime('%d.%m.%Y')} – {row['amount']:.2f} €"
+        for _, row in history_df.iterrows()
+    ]
+    selected_label = st.selectbox("Transaktion auswählen", options)
+    selected_index = options.index(selected_label)
+    selected_date = history_df.iloc[selected_index]["date"]
+    selected_amount = history_df.iloc[selected_index]["amount"]
+
+    if st.button("Ausgewählte Transaktion löschen"):
+        for i, t in enumerate(st.session_state.transactions):
+            if pd.to_datetime(t["date"]) == selected_date and float(t["amount"]) == selected_amount:
+                del st.session_state.transactions[i]
+                break
+        st.success("Transaktion gelöscht.")
+        st.rerun()
+else:
+    st.info("Keine Transaktionen vorhanden.")
