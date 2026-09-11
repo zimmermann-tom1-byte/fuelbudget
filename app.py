@@ -157,32 +157,63 @@ st.markdown("### Ausgabenverlauf & Prognosemodelle")
 
 fig = go.Figure()
 
-# Reale Ausgaben
-fig.add_trace(go.Scatter(
-    x=df["date"], 
-    y=df["amount"],
-    mode="lines+markers",
-    name="Reale Ausgaben (€)",
-    line=dict(color="#38bdf8", width=3),
-    marker=dict(size=6)
-))
+if not df.empty:
+    # Transaktionen zu Kalenderwochen (Montag-Sonntag) zusammenfassen, damit
+    # einzelne Tankbetraege nicht mehr als zackige Linie erscheinen. Wochen
+    # ohne Tankvorgang werden explizit mit 0 aufgefuellt, damit im Chart
+    # keine Luecke entsteht und die Trendlinie nicht ueber sie hinwegspringt.
+    week_start = (df["date"] - pd.to_timedelta(df["date"].dt.weekday, unit="D")).dt.normalize()
+    weekly_amounts = df.assign(week_start=week_start).groupby("week_start")["amount"].sum()
+    all_weeks = pd.date_range(weekly_amounts.index.min(), weekly_amounts.index.max(), freq="7D")
+    weekly_amounts = weekly_amounts.reindex(all_weeks, fill_value=0.0)
 
-# SMA Linie
-df["SMA"] = amounts.rolling(window=window).mean()
-fig.add_trace(go.Scatter(
-    x=df["date"], 
-    y=df["SMA"],
-    mode="lines",
-    name="SMA (Gleitender Durchschnitt)",
-    line=dict(color="#f59e0b", width=1.5, dash="dash")
-))
+    # Expandierende Prognose-Trendlinie: fuer jede Woche wird der Wert
+    # berechnet, den der gewaehlte Modus mit allen BIS DAHIN bekannten Wochen
+    # geliefert haette - kein fixes Rolling-Window wie zuvor.
+    if mode == "SMA":
+        trend = weekly_amounts.expanding().mean()
+    elif mode == "WMA":
+        def _expanding_wma(values):
+            w = np.arange(1, len(values) + 1)
+            return np.average(values, weights=w)
+        trend = weekly_amounts.expanding().apply(_expanding_wma, raw=True)
+    else:
+        trend = weekly_amounts.ewm(alpha=k_factor, adjust=False).mean()
+
+    # Balken: reale Ausgaben pro Kalenderwoche
+    fig.add_trace(go.Bar(
+        x=weekly_amounts.index,
+        y=weekly_amounts.values,
+        name="Reale Ausgaben pro KW (€)",
+        marker=dict(color="#38bdf8")
+    ))
+
+    # Glatte Linie: expandierender Prognose-Trend passend zum Sidebar-Modus
+    fig.add_trace(go.Scatter(
+        x=trend.index,
+        y=trend.values,
+        mode="lines",
+        name=f"Prognose-Trend ({mode})",
+        line=dict(color="#f59e0b", width=2.5, shape="spline")
+    ))
+
+    # Referenzlinie: aktuelles Wochenbudget inkl. Puffer
+    fig.add_hline(
+        y=final_weekly_forecast,
+        line_dash="dash",
+        line_color="#64748b",
+        line_width=1.5,
+        annotation_text="Aktuelles Wochenbudget",
+        annotation_position="top left",
+        annotation_font_color="#94a3b8"
+    )
 
 fig.update_layout(
     template="plotly_dark",
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor="rgba(0,0,0,0)",
     margin=dict(l=20, r=20, t=30, b=20),
-    xaxis=dict(title="Datum", gridcolor="#1e293b"),
+    xaxis=dict(title="Kalenderwoche (Montag)", gridcolor="#1e293b"),
     yaxis=dict(title="Betrag (€)", gridcolor="#1e293b"),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
 )
