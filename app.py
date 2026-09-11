@@ -45,8 +45,19 @@ with st.sidebar.form("add_transaction_form", clear_on_submit=True):
     new_date = st.date_input("Datum", value=datetime.today())
     new_amount = st.number_input("Gesamtbetrag (€)", min_value=0.0, step=0.01, format="%.2f")
     submitted = st.form_submit_button("Transaktion speichern")
-            
-# Neue Transaktion direkt in Supabase speichern 
+
+# --- PROGNOSE-PARAMETER (Sidebar) ---
+# Muss VOR jedem moeglichen st.rerun() stehen: wird ein Widget in einem
+# Skriptdurchlauf nicht instanziiert (z. B. weil st.rerun() vorher abbricht),
+# setzt Streamlit dessen session_state beim naechsten Durchlauf auf den
+# Default zurueck - unabhaengig vom key=. Reihenfolge daher bewusst so.
+st.sidebar.markdown("---")
+st.sidebar.header("Prognose-Parameter")
+mode = st.sidebar.selectbox("Berechnungsmodus", ["EMA", "SMA", "WMA"], index=0, key="mode_select")
+k_factor = st.sidebar.slider("Glättungsfaktor K (nur EMA)", min_value=0.01, max_value=1.0, value=0.15, step=0.01, key="k_factor_slider")
+buffer_pct = st.sidebar.slider("Sicherheitspuffer (%)", min_value=-10, max_value=100, value=10, step=1, key="buffer_pct_slider")
+
+# Neue Transaktion direkt in Supabase speichern
 if submitted:
     if new_amount > 0:
         supabase.table("transactions").insert({
@@ -57,13 +68,6 @@ if submitted:
         st.rerun()
     else:
         st.error("Bitte erst alle Felder gültig ausfüllen.")
-
-# --- PROGNOSE-PARAMETER (Sidebar) ---
-st.sidebar.markdown("---")
-st.sidebar.header("Prognose-Parameter")
-mode = st.sidebar.selectbox("Berechnungsmodus", ["EMA", "SMA", "WMA"], index=0, key="mode_select")
-k_factor = st.sidebar.slider("Glättungsfaktor K (nur EMA)", min_value=0.01, max_value=1.0, value=0.15, step=0.01, key="k_factor_slider")
-buffer_pct = st.sidebar.slider("Sicherheitspuffer (%)", min_value=-10, max_value=100, value=10, step=1, key="buffer_pct_slider")
 
 # --- BERECHNUNG DER PROGNOSEMODELLE ---
 amounts = df.sort_values("date", ascending=True)["amount"].reset_index(drop=True)
