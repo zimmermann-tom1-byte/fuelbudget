@@ -53,9 +53,40 @@ with st.sidebar.form("add_transaction_form", clear_on_submit=True):
 # Default zurueck - unabhaengig vom key=. Reihenfolge daher bewusst so.
 st.sidebar.markdown("---")
 st.sidebar.header("Prognose-Parameter")
+
 mode = st.sidebar.selectbox("Berechnungsmodus", ["EMA", "SMA", "WMA"], index=0, key="mode_select")
+with st.sidebar.popover("ℹ️ Was bedeutet das & welchen Modus wähle ich?", width="stretch"):
+    st.markdown("""
+**Das Grundproblem:** Ein reiner Durchschnitt über alle Tankvorgänge wird mit wachsender Datenmenge immer träger. Fährst du nach einer ruhigen Phase (z. B. Winter, Homeoffice) plötzlich wieder mehr, würde ein einfacher Durchschnitt das erst nach sehr vielen Wochen "merken". Die drei Modi sind unterschiedliche Antworten auf die Frage, wie stark neuere Tankvorgänge gegenüber älteren zählen sollen.
+
+**SMA – Simple Moving Average:** Jeder Tankvorgang zählt gleich viel, egal ob er heute oder vor einem Jahr war. → Sinnvoll, wenn dein Fahrverhalten insgesamt stabil ist und du eine robuste, schwankungsarme Langzeit-Referenz willst.
+
+**WMA – Weighted Moving Average:** Neuere Tankvorgänge zählen linear mehr als ältere. → Ein Kompromiss: reagiert etwas schneller als SMA auf Veränderungen, ohne alte Daten komplett zu verwerfen.
+
+**EMA – Exponential Moving Average:** Reagiert am schnellsten auf aktuelle Änderungen, weil neuere Werte exponentiell stärker gewichtet werden. → Die beste Wahl, wenn sich dein Fahrverhalten öfter ändert (Jobwechsel, Saisonalität, mal mehr/weniger unterwegs) und die Prognose zeitnah mitziehen soll.
+""")
+
 k_factor = st.sidebar.slider("Glättungsfaktor K (nur EMA)", min_value=0.01, max_value=1.0, value=0.15, step=0.01, key="k_factor_slider")
+with st.sidebar.popover("ℹ️ Was steuert dieser Regler?", width="stretch"):
+    st.markdown("""
+**Das Grundproblem:** Bei EMA muss festgelegt werden, *wie schnell* "schnell reagieren" genau bedeutet – genau das steuert K. Er bestimmt die Balance zwischen Stabilität und Reaktionsgeschwindigkeit.
+
+**Hoher K-Wert (nah an 1,0):** Fast nur der letzte Tankvorgang zählt. Die Prognose "springt" stark bei jeder einzelnen Tankung mit – reagiert sofort auf Veränderungen, ist aber auch anfällig dafür, von einem einzelnen ungewöhnlich hohen oder niedrigen Betrag verzerrt zu werden.
+
+**Niedriger K-Wert (nah an 0,01):** Die Prognose ändert sich nur sehr langsam, auch wenn sich das tatsächliche Fahrverhalten schon geändert hat – dafür ist sie robust gegen einzelne Ausreißer (z. B. eine ungewöhnlich teure oder günstige Tankfüllung).
+
+Es geht also um die Frage: Vertraust du eher dem langfristigen Muster oder den letzten paar Tankvorgängen?
+""")
+
 buffer_pct = st.sidebar.slider("Sicherheitspuffer (%)", min_value=-10, max_value=100, value=10, step=1, key="buffer_pct_slider")
+with st.sidebar.popover("ℹ️ Wozu dient dieser Puffer?", width="stretch"):
+    st.markdown("""
+**Das Grundproblem:** Der berechnete SMA-/WMA-/EMA-Wert ist eine reine statistische Erwartung – es ist kein Sicherheitsspielraum für Unvorhergesehenes eingerechnet. Der Puffer erlaubt dir, diesen Erwartungswert bewusst nach oben oder unten zu verschieben.
+
+**Positiver Puffer:** Schafft eine Sicherheitsmarge nach oben – sinnvoll, wenn du lieber etwas mehr Budget einplanst, falls unerwartet mehr gefahren wird oder die Spritpreise steigen, statt am Monatsende negativ überrascht zu werden.
+
+**Negativer Puffer:** Setzt bewusst ein knapperes Budget an, als der statistische Durchschnitt nahelegt – sinnvoll als Sparziel, oder wenn du weißt, dass du künftig strukturell weniger fahren wirst (z. B. Fahrgemeinschaft, Homeoffice), die historischen Daten das aber noch nicht widerspiegeln.
+""")
 
 # Neue Transaktion direkt in Supabase speichern
 if submitted:
