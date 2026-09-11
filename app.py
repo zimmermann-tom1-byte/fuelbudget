@@ -171,6 +171,6 @@ else:
         col1, col2, col3 = st.columns([3, 2, 1])
         col1.write(row["date"].strftime("%d.%m.%Y"))
         col2.write(f"{row['amount']:.2f} €")
- if col3.button("🗑️", key=f"delete_{row['id']}"):
+        if col3.button("🗑️", key=f"delete_{row['id']}"):
             supabase.table("transactions").delete().eq("id", row["id"]).execute()
             st.rerun()
