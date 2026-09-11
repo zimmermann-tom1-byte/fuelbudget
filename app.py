@@ -4,6 +4,10 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
 import uuid
+from supabase import create_client
+
+# --- SUPABASE VERBINDUNG ---
+supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -23,62 +27,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 def load_data():
-    df = pd.DataFrame(st.session_state.transactions)
+    response = supabase.table("transactions").select("*").execute()
+    df = pd.DataFrame(response.data)
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date", ascending=False).reset_index(drop=True)
     return df
 
-# --- LOKALER DATENSPEICHER (Platzhalter, bis Supabase wieder angebunden ist) ---
-if "transactions" not in st.session_state:
-    st.session_state.transactions = []
-
-# Absicherung: aeltere Eintraege ohne "id" (aus frueheren Versionen) nachtraeglich ergaenzen
-for t in st.session_state.transactions:
-    if "id" not in t:
-        t["id"] = str(uuid.uuid4())
-
 df = load_data()
-# --- INITIAL DATA SEEDING (falls Datenbank leer ist) ---
-if df.empty:
-    initial_data = [
-        {"date": "2026-02-11", "amount": 34.39, "location": "SB Tank 9893"},
-        {"date": "2026-02-13", "amount": 26.99, "location": "SB Tank 9893"},
-        {"date": "2026-02-17", "amount": 57.40, "location": "JET Tankstelle"},
-        {"date": "2026-02-27", "amount": 9.90, "location": "SB Tank 9893"},
-        {"date": "2026-02-28", "amount": 57.25, "location": "TANKSTELLE P. BECKER"},
-        {"date": "2026-02-28", "amount": 20.15, "location": "TANKSTELLE P. BECKER"},
-        {"date": "2026-03-04", "amount": 29.72, "location": "AVIA"},
-        {"date": "2026-03-09", "amount": 57.03, "location": "JET Tankstelle"},
-        {"date": "2026-03-15", "amount": 46.77, "location": "AVIA"},
-        {"date": "2026-03-22", "amount": 30.01, "location": "JET Tankstelle"},
-        {"date": "2026-03-27", "amount": 86.79, "location": "TANKSTELLE P. BECKER"},
-        {"date": "2026-04-05", "amount": 62.92, "location": "JET Tankstelle"},
-        {"date": "2026-04-17", "amount": 57.89, "location": "TANKSTELLE P. BECKER"},
-        {"date": "2026-04-29", "amount": 71.83, "location": "CALPAM TANKAUTOMAT"},
-        {"date": "2026-05-06", "amount": 36.11, "location": "CALPAM TANKAUTOMAT"},
-        {"date": "2026-05-08", "amount": 26.35, "location": "SB Tank 9893"},
-        {"date": "2026-05-16", "amount": 61.09, "location": "Raiffeisen Westfalen Mitte"},
-        {"date": "2026-05-27", "amount": 68.25, "location": "SB Tank 9893"},
-        {"date": "2026-06-07", "amount": 30.33, "location": "TANKSTELLE P. BECKER"},
-        {"date": "2026-06-10", "amount": 16.08, "location": "JET Tankstelle"},
-        {"date": "2026-06-15", "amount": 49.95, "location": "JET Tankstelle"},
-        {"date": "2026-06-17", "amount": 16.01, "location": "SB Tank 9893"},
-        {"date": "2026-06-27", "amount": 63.63, "location": "CALPAM TANKAUTOMAT"},
-        {"date": "2026-06-30", "amount": 64.81, "location": "SB Tank 9893"},
-        {"date": "2026-07-03", "amount": 26.88, "location": "CALPAM TANKAUTOMAT"},
-        {"date": "2026-07-13", "amount": 73.39, "location": "Tankstelle"},
-        {"date": "2026-07-20", "amount": 50.00, "location": "Tankstelle"},
-        {"date": "2026-07-30", "amount": 69.70, "location": "Tankstelle"},
-        {"date": "2026-08-01", "amount": 39.84, "location": "Tankstelle"},
-        {"date": "2026-08-12", "amount": 60.97, "location": "Tankstelle"},
-        {"date": "2026-08-19", "amount": 46.50, "location": "Tankstelle"},
-        {"date": "2026-09-02", "amount": 69.18, "location": "Tankstelle"}
-    ]
-    for t in initial_data:
-        t["id"] = str(uuid.uuid4())
-    st.session_state.transactions = initial_data
-    df = load_data()
 
 # --- HEADER & SIDEBAR ---
 st.title("FuelBudget 🚗⛽")
@@ -90,15 +46,14 @@ with st.sidebar.form("add_transaction_form", clear_on_submit=True):
     new_amount = st.number_input("Gesamtbetrag (€)", min_value=0.0, step=0.01, format="%.2f")
     submitted = st.form_submit_button("Transaktion speichern")
             
-# Neue Transaktion direkt in Supabase speichern
+# Neue Transaktion direkt in Supabase speichern 
 if submitted:
     if new_amount > 0:
-        st.session_state.transactions.append({
-            "id": str(uuid.uuid4()),
+        supabase.table("transactions").insert({
             "date": str(new_date),
             "amount": float(new_amount),
-        })
-        st.success("Transaktion gespeichert (nur für diese Sitzung, noch nicht dauerhaft).")
+        }).execute()
+        st.success("Transaktion dauerhaft in der Cloud gespeichert!")
         st.rerun()
     else:
         st.error("Bitte erst alle Felder gültig ausfüllen.")
@@ -216,8 +171,6 @@ else:
         col1, col2, col3 = st.columns([3, 2, 1])
         col1.write(row["date"].strftime("%d.%m.%Y"))
         col2.write(f"{row['amount']:.2f} €")
-        if col3.button("🗑️", key=f"delete_{row['id']}"):
-            st.session_state.transactions = [
-                t for t in st.session_state.transactions if t["id"] != row["id"]
-            ]
+ if col3.button("🗑️", key=f"delete_{row['id']}"):
+            supabase.table("transactions").delete().eq("id", row["id"]).execute()
             st.rerun()
