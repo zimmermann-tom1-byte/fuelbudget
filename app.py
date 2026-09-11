@@ -61,9 +61,9 @@ if submitted:
 # --- PROGNOSE-PARAMETER (Sidebar) ---
 st.sidebar.markdown("---")
 st.sidebar.header("Prognose-Parameter")
-mode = st.sidebar.selectbox("Berechnungsmodus", ["EMA", "SMA", "WMA"], index=0)
-k_factor = st.sidebar.slider("Glättungsfaktor K (nur EMA)", min_value=0.01, max_value=1.0, value=0.15, step=0.01)
-buffer_pct = st.sidebar.slider("Sicherheitspuffer (%)", min_value=-10, max_value=100, value=10, step=1)
+mode = st.sidebar.selectbox("Berechnungsmodus", ["EMA", "SMA", "WMA"], index=0, key="mode_select")
+k_factor = st.sidebar.slider("Glättungsfaktor K (nur EMA)", min_value=0.01, max_value=1.0, value=0.15, step=0.01, key="k_factor_slider")
+buffer_pct = st.sidebar.slider("Sicherheitspuffer (%)", min_value=-10, max_value=100, value=10, step=1, key="buffer_pct_slider")
 
 # --- BERECHNUNG DER PROGNOSEMODELLE ---
 amounts = df.sort_values("date", ascending=True)["amount"].reset_index(drop=True)
