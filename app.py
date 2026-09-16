@@ -32,6 +32,13 @@ def load_data():
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date", ascending=False).reset_index(drop=True)
+        # Robust gegenueber DBs, auf denen die ALTER-TABLE-Migration fuer
+        # km_stand/preis_pro_liter noch nicht ausgefuehrt wurde.
+        for col in ("km_stand", "preis_pro_liter"):
+            if col not in df.columns:
+                df[col] = np.nan
+            else:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
 df = load_data()
@@ -44,6 +51,8 @@ st.sidebar.header("Neuer Tankvorgang")
 with st.sidebar.form("add_transaction_form", clear_on_submit=True):
     new_date = st.date_input("Datum", value=datetime.today())
     new_amount = st.number_input("Gesamtbetrag (€)", min_value=0.0, step=0.01, format="%.2f")
+    new_km = st.number_input("Kilometerstand (optional)", min_value=0.0, step=1.0, format="%.0f", value=None)
+    new_preis_pro_liter = st.number_input("Preis pro Liter (€/l, optional)", min_value=0.0, step=0.001, format="%.3f", value=None)
     submitted = st.form_submit_button("Transaktion speichern")
 
 # --- PROGNOSE-PARAMETER (Sidebar) ---
@@ -94,6 +103,8 @@ if submitted:
         supabase.table("transactions").insert({
             "date": str(new_date),
             "amount": float(new_amount),
+            "km_stand": float(new_km) if new_km is not None else None,
+            "preis_pro_liter": float(new_preis_pro_liter) if new_preis_pro_liter is not None else None,
         }).execute()
         st.success("Transaktion dauerhaft in der Cloud gespeichert!")
         st.rerun()
@@ -219,6 +230,85 @@ fig.update_layout(
 )
 
 st.plotly_chart(fig, use_container_width=True)
+
+# --- KILOMETER & VERBRAUCH ---
+st.markdown("### Kilometer & Verbrauch")
+
+if df.empty:
+    st.info("Keine Transaktionen vorhanden.")
+else:
+    # Chronologische Kopie fuer die Verbrauchsberechnung.
+    verbrauch_df = df.sort_values("date", ascending=True).reset_index(drop=True)
+
+    # Liter pro Tankvorgang, nur wenn ein gueltiger Preis/Liter vorliegt.
+    has_preis = verbrauch_df["preis_pro_liter"].notna() & (verbrauch_df["preis_pro_liter"] > 0)
+    verbrauch_df["liter"] = np.where(has_preis, verbrauch_df["amount"] / verbrauch_df["preis_pro_liter"], np.nan)
+
+    # Gefahrene km seit der chronologisch vorherigen Tankung MIT km_stand
+    # (Tankungen ohne km_stand werden dabei uebersprungen, nicht als 0 gewertet).
+    km_mask = verbrauch_df["km_stand"].notna()
+    km_diffs = verbrauch_df.loc[km_mask, "km_stand"].diff()
+    verbrauch_df["gefahrene_km"] = np.nan
+    verbrauch_df.loc[km_diffs.index, "gefahrene_km"] = km_diffs
+
+    # Verbrauch in L/100km, nur wenn Liter und gefahrene km vorhanden und > 0.
+    has_verbrauch = verbrauch_df["liter"].notna() & verbrauch_df["gefahrene_km"].notna() & (verbrauch_df["gefahrene_km"] > 0)
+    verbrauch_df["verbrauch_l_100km"] = np.where(
+        has_verbrauch, (verbrauch_df["liter"] / verbrauch_df["gefahrene_km"]) * 100, np.nan
+    )
+
+    km_chart_df = verbrauch_df.dropna(subset=["km_stand"])
+    verbrauch_chart_df = verbrauch_df.dropna(subset=["verbrauch_l_100km"])
+
+    km_col, verbrauch_col = st.columns(2)
+
+    with km_col:
+        st.markdown("**Kilometerstand über die Zeit**")
+        if km_chart_df.empty:
+            st.info("Noch keine Kilometerstände erfasst.")
+        else:
+            km_fig = go.Figure()
+            km_fig.add_trace(go.Scatter(
+                x=km_chart_df["date"],
+                y=km_chart_df["km_stand"],
+                mode="lines+markers",
+                name="Kilometerstand",
+                line=dict(color="#38bdf8", width=2.5),
+                marker=dict(size=6)
+            ))
+            km_fig.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=20, r=20, t=20, b=20),
+                xaxis=dict(title="Datum", gridcolor="#1e293b"),
+                yaxis=dict(title="Kilometerstand (km)", gridcolor="#1e293b"),
+                showlegend=False
+            )
+            st.plotly_chart(km_fig, use_container_width=True)
+
+    with verbrauch_col:
+        st.markdown("**Verbrauch (L/100km) pro Tankvorgang**")
+        if verbrauch_chart_df.empty:
+            st.info("Noch nicht genug Daten für eine Verbrauchsberechnung (Preis/Liter und mind. zwei Kilometerstände nötig).")
+        else:
+            verbrauch_fig = go.Figure()
+            verbrauch_fig.add_trace(go.Bar(
+                x=verbrauch_chart_df["date"],
+                y=verbrauch_chart_df["verbrauch_l_100km"],
+                name="Verbrauch (L/100km)",
+                marker=dict(color="#f59e0b")
+            ))
+            verbrauch_fig.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=20, r=20, t=20, b=20),
+                xaxis=dict(title="Datum", gridcolor="#1e293b"),
+                yaxis=dict(title="L/100km", gridcolor="#1e293b"),
+                showlegend=False
+            )
+            st.plotly_chart(verbrauch_fig, use_container_width=True)
 
 # --- HISTORIE TABELLE MIT LÖSCH-BUTTON PRO ZEILE ---
 st.markdown("### Historie aller Transaktionen")
