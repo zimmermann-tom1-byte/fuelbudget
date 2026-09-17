@@ -330,6 +330,188 @@ else:
             )
             st.plotly_chart(verbrauch_fig, use_container_width=True)
 
+# --- AUSGABEN AKTUELLER MONAT (EIN BALKEN, EIN SEGMENT PRO TANKVORGANG) ---
+st.markdown("### Ausgaben aktueller Monat")
+
+MONATSNAMEN = [
+    "Januar", "Februar", "März", "April", "Mai", "Juni",
+    "Juli", "August", "September", "Oktober", "November", "Dezember"
+]
+SEGMENT_FARBEN = [
+    "#38bdf8", "#f59e0b", "#a78bfa", "#34d399", "#f472b6",
+    "#facc15", "#60a5fa", "#fb923c", "#4ade80", "#c084fc"
+]
+
+heute = datetime.today()
+monat_df = df[
+    (df["date"].dt.year == heute.year) & (df["date"].dt.month == heute.month)
+].sort_values("date").reset_index(drop=True)
+monatsname = f"{MONATSNAMEN[heute.month - 1]} {heute.year}"
+
+monat_chart_col, monat_info_col = st.columns([1, 3])
+
+with monat_chart_col:
+    if monat_df.empty:
+        st.info(f"Noch keine Tankvorgänge im {monatsname}.")
+    else:
+        ausgegeben_monat = monat_df["amount"].sum()
+
+        monat_fig = go.Figure()
+        for i, row in monat_df.iterrows():
+            monat_fig.add_trace(go.Bar(
+                x=[monatsname],
+                y=[row["amount"]],
+                marker=dict(color=SEGMENT_FARBEN[i % len(SEGMENT_FARBEN)]),
+                hovertemplate=f"{row['date'].strftime('%d.%m.%Y')}<br>{row['amount']:.2f} €<extra></extra>"
+            ))
+
+        # Ausgegrauter Teil: Rest der Monats-Hochrechnung (Sidebar-Modus + Puffer),
+        # der laut Prognose diesen Monat noch dazukommen duerfte.
+        prognostizierter_rest = max(final_monthly_projection - ausgegeben_monat, 0)
+        if prognostizierter_rest > 0:
+            monat_fig.add_trace(go.Bar(
+                x=[monatsname],
+                y=[prognostizierter_rest],
+                marker=dict(color="rgba(148, 163, 184, 0.35)"),
+                hovertemplate=f"Prognostizierter Rest ({mode}): {prognostizierter_rest:.2f} €<extra></extra>"
+            ))
+
+        monat_fig.update_layout(
+            barmode="stack",
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=10, r=10, t=10, b=10),
+            xaxis=dict(visible=False),
+            yaxis=dict(title="€", gridcolor="#1e293b"),
+            showlegend=False,
+            bargap=0.55,
+            height=320
+        )
+        st.plotly_chart(monat_fig, use_container_width=True)
+
+with monat_info_col:
+    if not monat_df.empty:
+        st.metric(f"Bisher ausgegeben im {monatsname}", f"{ausgegeben_monat:.2f} €", delta=f"{len(monat_df)} Tankungen")
+        if prognostizierter_rest > 0:
+            st.caption(
+                f"Grau = prognostizierter Rest bis Monatsende ({mode}-Hochrechnung: "
+                f"{final_monthly_projection:.2f} € gesamt)."
+            )
+        else:
+            st.caption(f"Bereits über der {mode}-Monats-Hochrechnung von {final_monthly_projection:.2f} €.")
+
+# --- ÖLWECHSEL-TRACKER ---
+st.markdown("### Ölwechsel-Tracker")
+
+def load_oil_settings():
+    try:
+        response = supabase.table("oil_change_settings").select("*").limit(1).execute()
+        return response.data[0] if response.data else {}
+    except Exception:
+        return None
+
+oil_settings = load_oil_settings()
+
+if oil_settings is None:
+    st.info(
+        "Für den Ölwechsel-Tracker wird eine zusätzliche Tabelle in Supabase benötigt, die noch "
+        "nicht existiert. Bitte das SQL-Snippet aus dem Chat in Supabase ausführen und die Seite "
+        "danach neu laden."
+    )
+elif not oil_settings:
+    st.write("Noch keine Ölwechsel-Einstellungen hinterlegt.")
+    with st.form("oil_setup_form"):
+        setup_interval = st.number_input(
+            "Ölwechselintervall (km)", min_value=1000.0, step=500.0, value=15000.0, format="%.0f"
+        )
+        setup_vor_km = st.number_input(
+            "Letzter Ölwechsel war vor wie vielen km? (0 = gerade gemacht)",
+            min_value=0.0, step=100.0, value=0.0, format="%.0f"
+        )
+        setup_submitted = st.form_submit_button("Einstellungen speichern")
+
+    if setup_submitted:
+        if letzter_km_stand is None:
+            st.error("Es ist noch kein Kilometerstand erfasst. Bitte zuerst einen Tankvorgang mit Kilometerstand eintragen.")
+        else:
+            supabase.table("oil_change_settings").insert({
+                "id": 1,
+                "interval_km": float(setup_interval),
+                "last_oil_change_km": float(letzter_km_stand - setup_vor_km),
+            }).execute()
+            st.success("Ölwechsel-Einstellungen gespeichert.")
+            st.rerun()
+else:
+    interval_km = oil_settings["interval_km"]
+    last_oil_change_km = oil_settings["last_oil_change_km"]
+    naechster_wechsel_km = last_oil_change_km + interval_km
+
+    if letzter_km_stand is None:
+        st.info("Noch kein Kilometerstand erfasst - Fortschritt kann nicht berechnet werden.")
+    else:
+        gefahren_seit_wechsel = max(letzter_km_stand - last_oil_change_km, 0)
+        rest_km = max(naechster_wechsel_km - letzter_km_stand, 0)
+        fortschritt_pct = min(gefahren_seit_wechsel / interval_km, 1.0) if interval_km > 0 else 0.0
+
+        st.progress(fortschritt_pct)
+
+        anzeige_modus = st.radio(
+            "Anzeige", ["Relativ (%)", "Gesamt-km beim nächsten Wechsel", "Verbleibende km"],
+            horizontal=True, key="oil_anzeige_modus", label_visibility="collapsed"
+        )
+        if anzeige_modus == "Relativ (%)":
+            st.metric("Fortschritt bis zum nächsten Ölwechsel", f"{fortschritt_pct * 100:.0f} %")
+        elif anzeige_modus == "Gesamt-km beim nächsten Wechsel":
+            st.metric("Nächster Ölwechsel fällig bei", f"{naechster_wechsel_km:.0f} km")
+        else:
+            st.metric("Noch verbleibende km bis zum Ölwechsel", f"{rest_km:.0f} km")
+
+        if rest_km <= 0:
+            st.warning("Der Ölwechsel ist überfällig!")
+
+        # Datum/KW-Prognose anhand der durchschnittlichen Fahrleistung aus der Historie.
+        km_history = df.dropna(subset=["km_stand"]).sort_values("date")
+        if len(km_history) >= 2:
+            zeitspanne_tage = (km_history["date"].iloc[-1] - km_history["date"].iloc[0]).days
+            km_differenz = km_history["km_stand"].iloc[-1] - km_history["km_stand"].iloc[0]
+            if zeitspanne_tage > 0 and km_differenz > 0:
+                km_pro_tag = km_differenz / zeitspanne_tage
+                tage_bis_wechsel = rest_km / km_pro_tag
+                prognose_datum = heute + pd.Timedelta(days=tage_bis_wechsel)
+                prognose_kw = prognose_datum.isocalendar()[1]
+                st.caption(
+                    f"Voraussichtlich fällig: ca. {prognose_datum.strftime('%d.%m.%Y')} (KW {prognose_kw}), "
+                    f"basierend auf ⌀ {km_pro_tag:.1f} km/Tag aus der Fahrhistorie."
+                )
+            else:
+                st.caption("Noch nicht genug Fahrdaten für eine Datums-Prognose.")
+        else:
+            st.caption("Noch nicht genug Fahrdaten für eine Datums-Prognose (mind. zwei Kilometerstände nötig).")
+
+    with st.expander("Ölwechsel-Einstellungen ändern"):
+        with st.form("oil_update_form"):
+            edit_interval = st.number_input(
+                "Ölwechselintervall (km)", min_value=1000.0, step=500.0,
+                value=float(interval_km), format="%.0f"
+            )
+            edit_vor_km = st.number_input(
+                "Neuen Ölwechsel eintragen: vor wie vielen km? (leer lassen = keine Änderung)",
+                min_value=0.0, step=100.0, value=None, format="%.0f"
+            )
+            edit_submitted = st.form_submit_button("Speichern")
+
+        if edit_submitted:
+            if edit_vor_km is not None and letzter_km_stand is None:
+                st.error("Es ist noch kein Kilometerstand erfasst.")
+            else:
+                update_payload = {"interval_km": float(edit_interval)}
+                if edit_vor_km is not None:
+                    update_payload["last_oil_change_km"] = float(letzter_km_stand - edit_vor_km)
+                supabase.table("oil_change_settings").update(update_payload).eq("id", 1).execute()
+                st.success("Aktualisiert.")
+                st.rerun()
+
 # --- HISTORIE TABELLE: EINKLAPPBAR, PRO ZEILE EINZELN BEARBEITBAR ODER LÖSCHBAR ---
 history_df = df.sort_values("date", ascending=False).reset_index(drop=True)
 
