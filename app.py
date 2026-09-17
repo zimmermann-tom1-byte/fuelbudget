@@ -101,6 +101,9 @@ with st.sidebar.popover("ℹ️ Wozu dient dieser Puffer?", width="stretch"):
 """)
 
 # Neue Transaktion direkt in Supabase speichern
+vorhandene_km = df["km_stand"].dropna()
+letzter_km_stand = vorhandene_km.max() if not vorhandene_km.empty else None
+
 if submitted:
     # Realistische Kraftstoffpreise liegen deutlich unter 5 €/l - typischer
     # Fehler ist die Eingabe des Tankstellen-Anzeigewerts in Cent (z. B. 175
@@ -109,6 +112,12 @@ if submitted:
         st.error(
             f"Preis pro Liter von {new_preis_pro_liter:.3f} € wirkt unrealistisch hoch. "
             "Bitte in Euro angeben (z. B. 1.75 statt 175)."
+        )
+    elif new_km is not None and letzter_km_stand is not None and new_km < letzter_km_stand:
+        st.error(
+            f"Kilometerstand ({new_km:.0f} km) liegt unter dem zuletzt erfassten Stand "
+            f"({letzter_km_stand:.0f} km). Ein Tachostand kann nicht sinken - bitte prüfen "
+            "oder den fehlerhaften Eintrag in der Historie korrigieren."
         )
     elif new_amount > 0:
         supabase.table("transactions").insert({
@@ -321,23 +330,65 @@ else:
             )
             st.plotly_chart(verbrauch_fig, use_container_width=True)
 
-# --- HISTORIE TABELLE MIT LÖSCH-BUTTON PRO ZEILE ---
-st.markdown("### Historie aller Transaktionen")
-
+# --- HISTORIE TABELLE: EINKLAPPBAR, PRO ZEILE EINZELN BEARBEITBAR ODER LÖSCHBAR ---
 history_df = df.sort_values("date", ascending=False).reset_index(drop=True)
 
-if history_df.empty:
-    st.info("Keine Transaktionen vorhanden.")
-else:
-    header_col1, header_col2, header_col3 = st.columns([3, 2, 1])
-    header_col1.markdown("**Datum**")
-    header_col2.markdown("**Betrag**")
-    header_col3.markdown("**Löschen**")
+with st.expander(f"**Historie aller Transaktionen ({len(history_df)})**", expanded=False):
+    if history_df.empty:
+        st.info("Keine Transaktionen vorhanden.")
+    else:
+        header_col1, header_col2, header_col3, header_col4, header_col5, header_col6 = st.columns([2, 2, 2, 2, 1, 1])
+        header_col1.markdown("**Datum**")
+        header_col2.markdown("**Betrag**")
+        header_col3.markdown("**Kilometerstand**")
+        header_col4.markdown("**Preis/l**")
+        header_col5.markdown("**Speichern**")
+        header_col6.markdown("**Löschen**")
 
-    for _, row in history_df.iterrows():
-        col1, col2, col3 = st.columns([3, 2, 1])
-        col1.write(row["date"].strftime("%d.%m.%Y"))
-        col2.write(f"{row['amount']:.2f} €")
-        if col3.button("🗑️", key=f"delete_{row['id']}"):
-            supabase.table("transactions").delete().eq("id", row["id"]).execute()
-            st.rerun()
+        for _, row in history_df.iterrows():
+            row_id = row["id"]
+            with st.form(f"edit_row_{row_id}", border=False):
+                c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 2, 1, 1])
+                edit_date = c1.date_input(
+                    "Datum", value=row["date"].date(), key=f"date_{row_id}", label_visibility="collapsed"
+                )
+                edit_amount = c2.number_input(
+                    "Betrag", value=float(row["amount"]), min_value=0.0, step=0.01, format="%.2f",
+                    key=f"amount_{row_id}", label_visibility="collapsed"
+                )
+                edit_km = c3.number_input(
+                    "Kilometerstand",
+                    value=(float(row["km_stand"]) if pd.notna(row["km_stand"]) else None),
+                    min_value=0.0, step=1.0, format="%.0f",
+                    key=f"km_{row_id}", label_visibility="collapsed"
+                )
+                edit_preis = c4.number_input(
+                    "Preis/l",
+                    value=(float(row["preis_pro_liter"]) if pd.notna(row["preis_pro_liter"]) else None),
+                    min_value=0.0, step=0.001, format="%.3f",
+                    key=f"preis_{row_id}", label_visibility="collapsed"
+                )
+                save_clicked = c5.form_submit_button("💾")
+                delete_clicked = c6.form_submit_button("🗑️")
+
+            if save_clicked:
+                if edit_preis is not None and edit_preis > 5:
+                    st.error(
+                        f"Preis pro Liter von {edit_preis:.3f} € wirkt unrealistisch hoch. "
+                        "Bitte in Euro angeben (z. B. 1.75 statt 175)."
+                    )
+                elif edit_amount <= 0:
+                    st.error("Betrag muss größer als 0 sein.")
+                else:
+                    supabase.table("transactions").update({
+                        "date": str(edit_date),
+                        "amount": float(edit_amount),
+                        "km_stand": float(edit_km) if edit_km is not None else None,
+                        "preis_pro_liter": float(edit_preis) if edit_preis is not None else None,
+                    }).eq("id", row_id).execute()
+                    st.success("Eintrag aktualisiert.")
+                    st.rerun()
+
+            if delete_clicked:
+                supabase.table("transactions").delete().eq("id", row_id).execute()
+                st.rerun()
