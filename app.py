@@ -470,8 +470,15 @@ else:
         if rest_km <= 0:
             st.warning("Der Ölwechsel ist überfällig!")
 
-        # Datum/KW-Prognose anhand der durchschnittlichen Fahrleistung aus der Historie.
-        km_history = df.dropna(subset=["km_stand"]).sort_values("date")
+        # Datum/KW-Prognose anhand der durchschnittlichen Fahrleistung. Gleitendes
+        # km-Fenster in Groesse des Oelwechselintervalls (statt der kompletten
+        # Historie), damit altes Fahrverhalten die Rate nicht dauerhaft verzerrt.
+        # Ist insgesamt weniger als ein Intervall an Historie vorhanden, bleibt
+        # der Filter wirkungslos und es wird automatisch die gesamte Historie
+        # verwendet - kein Sonderfall noetig.
+        km_fenster_start = max(letzter_km_stand - interval_km, 0)
+        km_history = df.dropna(subset=["km_stand"])
+        km_history = km_history[km_history["km_stand"] >= km_fenster_start].sort_values("date")
         if len(km_history) >= 2:
             zeitspanne_tage = (km_history["date"].iloc[-1] - km_history["date"].iloc[0]).days
             km_differenz = km_history["km_stand"].iloc[-1] - km_history["km_stand"].iloc[0]
