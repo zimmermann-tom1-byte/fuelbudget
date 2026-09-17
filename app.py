@@ -52,7 +52,10 @@ with st.sidebar.form("add_transaction_form", clear_on_submit=True):
     new_date = st.date_input("Datum", value=datetime.today())
     new_amount = st.number_input("Gesamtbetrag (€)", min_value=0.0, step=0.01, format="%.2f")
     new_km = st.number_input("Kilometerstand (optional)", min_value=0.0, step=1.0, format="%.0f", value=None)
-    new_preis_pro_liter = st.number_input("Preis pro Liter (€/l, optional)", min_value=0.0, step=0.001, format="%.3f", value=None)
+    new_preis_pro_liter = st.number_input(
+        "Preis pro Liter (€/l, optional)", min_value=0.0, step=0.001, format="%.3f", value=None,
+        help="In Euro angeben, z. B. 1,75 – nicht in Cent (die Tankstellenanzeige zeigt oft 175,0 Cent)."
+    )
     submitted = st.form_submit_button("Transaktion speichern")
 
 # --- PROGNOSE-PARAMETER (Sidebar) ---
@@ -99,7 +102,15 @@ with st.sidebar.popover("ℹ️ Wozu dient dieser Puffer?", width="stretch"):
 
 # Neue Transaktion direkt in Supabase speichern
 if submitted:
-    if new_amount > 0:
+    # Realistische Kraftstoffpreise liegen deutlich unter 5 €/l - typischer
+    # Fehler ist die Eingabe des Tankstellen-Anzeigewerts in Cent (z. B. 175
+    # statt 1.75), was die Verbrauchsberechnung um den Faktor 100 verfaelscht.
+    if new_preis_pro_liter is not None and new_preis_pro_liter > 5:
+        st.error(
+            f"Preis pro Liter von {new_preis_pro_liter:.3f} € wirkt unrealistisch hoch. "
+            "Bitte in Euro angeben (z. B. 1.75 statt 175)."
+        )
+    elif new_amount > 0:
         supabase.table("transactions").insert({
             "date": str(new_date),
             "amount": float(new_amount),
