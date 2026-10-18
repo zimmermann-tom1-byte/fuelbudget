@@ -1,20 +1,24 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
+import calendar
 from datetime import datetime
-import uuid
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
 from supabase import create_client
 
-# --- SUPABASE VERBINDUNG ---
-supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+from forecast import complete_weeks, forecast_trend, km_conflict, weekly_amounts
 
-# --- PAGE CONFIGURATION ---
+# --- PAGE CONFIGURATION (muss der erste Streamlit-Aufruf sein) ---
 st.set_page_config(
     page_title="FuelBudget",
     page_icon="⛽",
     layout="wide"
 )
+
+TZ = ZoneInfo("Europe/Berlin")  # Streamlit Cloud laeuft in UTC
+heute = pd.Timestamp(datetime.now(TZ).date())
 
 # Custom Dark Theme Styling
 st.markdown("""
@@ -22,26 +26,64 @@ st.markdown("""
     .main { background-color: #020617; color: #f8fafc; }
     .stMetric { background-color: #0f172a; border: 1px solid #1e293b; padding: 15px; border-radius: 12px; }
     div[data-testid="stForm"] { background-color: #0f172a; border: 1px solid #1e293b; }
-    div[data-testid="stDataFrame"] { background-colour: #0f172a; border-radius: 12px; }
+    div[data-testid="stDataFrame"] { background-color: #0f172a; border-radius: 12px; }
 </style>
 """, unsafe_allow_html=True)
 
+
+# --- SUPABASE VERBINDUNG ---
+# Client nur einmal pro Server-Prozess erzeugen statt bei jedem Rerun.
+@st.cache_resource
+def get_supabase():
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+
+
+supabase = get_supabase()
+
+
+# Streamlit fuehrt das GESAMTE Skript bei jeder Widget-Aenderung neu aus (jeder
+# Slider-Zug, jede Modus-Auswahl). Ohne Cache ging dabei jedes Mal eine Abfrage
+# an Supabase raus - das war der Hauptgrund, warum sich die Prognose-Parameter
+# traege anfuehlten. Nach jedem Schreibzugriff wird der Cache geleert.
+@st.cache_data(ttl=600, show_spinner=False)
 def load_data():
     response = supabase.table("transactions").select("*").execute()
     df = pd.DataFrame(response.data)
-    if not df.empty:
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values("date", ascending=False).reset_index(drop=True)
-        # Robust gegenueber DBs, auf denen die ALTER-TABLE-Migration fuer
-        # km_stand/preis_pro_liter noch nicht ausgefuehrt wurde.
-        for col in ("km_stand", "preis_pro_liter"):
-            if col not in df.columns:
-                df[col] = np.nan
-            else:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df
+    # Leere Tabelle -> DataFrame ohne Spalten; Spalten trotzdem anlegen,
+    # sonst stuerzt die App spaeter mit KeyError ab.
+    for col in ("id", "date", "amount", "km_stand", "preis_pro_liter"):
+        if col not in df.columns:
+            df[col] = pd.Series(dtype="object")
+    df["date"] = pd.to_datetime(df["date"])
+    for col in ("amount", "km_stand", "preis_pro_liter"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    # Bei mehreren Tankungen am selben Tag nach km_stand sortieren, damit die
+    # km-Differenzen in der Verbrauchsberechnung stimmen.
+    return df.sort_values(["date", "km_stand"], ascending=False, na_position="last").reset_index(drop=True)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_oil_settings():
+    try:
+        response = supabase.table("oil_change_settings").select("*").limit(1).execute()
+        return {"ok": True, "data": response.data[0] if response.data else {}}
+    except Exception as exc:  # Tabelle fehlt oder Verbindung gestoert
+        return {"ok": False, "error": str(exc)}
+
+
+def nach_schreibzugriff(meldung: str):
+    """Cache leeren, Meldung fuer den naechsten Durchlauf merken, neu laden.
+    (Ein st.success() direkt vor st.rerun() ist nie zu sehen.)"""
+    load_data.clear()
+    load_oil_settings.clear()
+    st.session_state["flash"] = meldung
+    st.rerun()
+
 
 df = load_data()
+
+if "flash" in st.session_state:
+    st.toast(st.session_state.pop("flash"), icon="✅")
 
 # --- HEADER & SIDEBAR ---
 st.title("FuelBudget 🚗⛽")
@@ -49,7 +91,7 @@ st.caption("Präzise Kraftstoffbudgetierung & Verbrauchsanalyse")
 
 st.sidebar.header("Neuer Tankvorgang")
 with st.sidebar.form("add_transaction_form", clear_on_submit=True):
-    new_date = st.date_input("Datum", value=datetime.today())
+    new_date = st.date_input("Datum", value=heute.date(), format="DD.MM.YYYY")
     new_amount = st.number_input("Gesamtbetrag (€)", min_value=0.0, step=0.01, format="%.2f")
     new_km = st.number_input("Kilometerstand (optional)", min_value=0.0, step=1.0, format="%.0f", value=None)
     new_preis_pro_liter = st.number_input(
@@ -69,25 +111,42 @@ st.sidebar.header("Prognose-Parameter")
 mode = st.sidebar.selectbox("Berechnungsmodus", ["EMA", "SMA", "WMA"], index=0, key="mode_select")
 with st.sidebar.popover("ℹ️ Was bedeutet das & welchen Modus wähle ich?", width="stretch"):
     st.markdown("""
-**Das Grundproblem:** Ein reiner Durchschnitt über alle Tankvorgänge wird mit wachsender Datenmenge immer träger. Fährst du nach einer ruhigen Phase (z. B. Winter, Homeoffice) plötzlich wieder mehr, würde ein einfacher Durchschnitt das erst nach sehr vielen Wochen "merken". Die drei Modi sind unterschiedliche Antworten auf die Frage, wie stark neuere Tankvorgänge gegenüber älteren zählen sollen.
+**Grundlage:** Gerechnet wird mit deinen Ausgaben **pro Kalenderwoche** – nicht pro Tankvorgang. Fährst du mehr, tankst du öfter, und genau das soll die Prognose sehen. Die laufende Woche zählt erst mit, wenn sie abgeschlossen ist.
 
-**SMA – Simple Moving Average:** Jeder Tankvorgang zählt gleich viel, egal ob er heute oder vor einem Jahr war. → Sinnvoll, wenn dein Fahrverhalten insgesamt stabil ist und du eine robuste, schwankungsarme Langzeit-Referenz willst.
+**SMA – Simple Moving Average:** Jede Woche im Betrachtungszeitraum zählt gleich viel. → Robuste, schwankungsarme Referenz, wenn dein Fahrverhalten stabil ist.
 
-**WMA – Weighted Moving Average:** Neuere Tankvorgänge zählen linear mehr als ältere. → Ein Kompromiss: reagiert etwas schneller als SMA auf Veränderungen, ohne alte Daten komplett zu verwerfen.
+**WMA – Weighted Moving Average:** Innerhalb des Betrachtungszeitraums zählen neuere Wochen linear mehr als ältere. → Kompromiss: reagiert schneller als SMA, ohne alte Wochen ganz zu verwerfen.
 
-**EMA – Exponential Moving Average:** Reagiert am schnellsten auf aktuelle Änderungen, weil neuere Werte exponentiell stärker gewichtet werden. → Die beste Wahl, wenn sich dein Fahrverhalten öfter ändert (Jobwechsel, Saisonalität, mal mehr/weniger unterwegs) und die Prognose zeitnah mitziehen soll.
+**EMA – Exponential Moving Average:** Neuere Wochen werden exponentiell stärker gewichtet, gesteuert über K. → Die beste Wahl, wenn sich dein Fahrverhalten öfter ändert und die Prognose zeitnah mitziehen soll.
 """)
 
-k_factor = st.sidebar.slider("Glättungsfaktor K (nur EMA)", min_value=0.01, max_value=1.0, value=0.15, step=0.01, key="k_factor_slider")
+window_option = st.sidebar.select_slider(
+    "Betrachtungszeitraum (Wochen, nur SMA/WMA)",
+    options=[4, 8, 12, 26, 52, "Alle"], value=12, key="window_slider",
+    disabled=(mode == "EMA"),
+)
+with st.sidebar.popover("ℹ️ Warum ein Zeitraum?", width="stretch"):
+    st.markdown("""
+**Das Grundproblem:** Bei einem Durchschnitt über *alle* Wochen hat jede neue Woche immer weniger Gewicht. Nach einem Jahr verschiebt eine einzelne Woche die Prognose kaum noch – die Prognose wird mit jeder Woche träger.
+
+**Kurzer Zeitraum (4–8 Wochen):** Zieht schnell mit, wenn du mehr oder weniger fährst, schwankt aber stärker.
+
+**Langer Zeitraum (26 Wochen bis „Alle“):** Sehr ruhig, merkt Veränderungen aber erst spät.
+""")
+
+k_factor = st.sidebar.slider(
+    "Glättungsfaktor K (nur EMA)", min_value=0.01, max_value=1.0, value=0.15, step=0.01,
+    key="k_factor_slider", disabled=(mode != "EMA"),
+)
 with st.sidebar.popover("ℹ️ Was steuert dieser Regler?", width="stretch"):
     st.markdown("""
 **Das Grundproblem:** Bei EMA muss festgelegt werden, *wie schnell* "schnell reagieren" genau bedeutet – genau das steuert K. Er bestimmt die Balance zwischen Stabilität und Reaktionsgeschwindigkeit.
 
-**Hoher K-Wert (nah an 1,0):** Fast nur der letzte Tankvorgang zählt. Die Prognose "springt" stark bei jeder einzelnen Tankung mit – reagiert sofort auf Veränderungen, ist aber auch anfällig dafür, von einem einzelnen ungewöhnlich hohen oder niedrigen Betrag verzerrt zu werden.
+**Hoher K-Wert (nah an 1,0):** Fast nur die letzte Woche zählt. Die Prognose "springt" stark mit – reagiert sofort auf Veränderungen, ist aber anfällig für einzelne ungewöhnliche Wochen.
 
-**Niedriger K-Wert (nah an 0,01):** Die Prognose ändert sich nur sehr langsam, auch wenn sich das tatsächliche Fahrverhalten schon geändert hat – dafür ist sie robust gegen einzelne Ausreißer (z. B. eine ungewöhnlich teure oder günstige Tankfüllung).
+**Niedriger K-Wert (nah an 0,01):** Die Prognose ändert sich nur sehr langsam, auch wenn sich das tatsächliche Fahrverhalten schon geändert hat – dafür ist sie robust gegen Ausreißer.
 
-Es geht also um die Frage: Vertraust du eher dem langfristigen Muster oder den letzten paar Tankvorgängen?
+Faustregel: K ≈ 2 / (Anzahl Wochen + 1). K = 0,15 entspricht also grob den letzten 12 Wochen.
 """)
 
 buffer_pct = st.sidebar.slider("Sicherheitspuffer (%)", min_value=-10, max_value=100, value=10, step=1, key="buffer_pct_slider")
@@ -100,6 +159,8 @@ with st.sidebar.popover("ℹ️ Wozu dient dieser Puffer?", width="stretch"):
 **Negativer Puffer:** Setzt bewusst ein knapperes Budget an, als der statistische Durchschnitt nahelegt – sinnvoll als Sparziel, oder wenn du weißt, dass du künftig strukturell weniger fahren wirst (z. B. Fahrgemeinschaft, Homeoffice), die historischen Daten das aber noch nicht widerspiegeln.
 """)
 
+window = None if window_option == "Alle" else int(window_option)
+
 # Neue Transaktion direkt in Supabase speichern
 vorhandene_km = df["km_stand"].dropna()
 letzter_km_stand = vorhandene_km.max() if not vorhandene_km.empty else None
@@ -108,17 +169,14 @@ if submitted:
     # Realistische Kraftstoffpreise liegen deutlich unter 5 €/l - typischer
     # Fehler ist die Eingabe des Tankstellen-Anzeigewerts in Cent (z. B. 175
     # statt 1.75), was die Verbrauchsberechnung um den Faktor 100 verfaelscht.
+    km_fehler = km_conflict(df, pd.Timestamp(new_date), new_km)
     if new_preis_pro_liter is not None and new_preis_pro_liter > 5:
-        st.error(
+        st.sidebar.error(
             f"Preis pro Liter von {new_preis_pro_liter:.3f} € wirkt unrealistisch hoch. "
             "Bitte in Euro angeben (z. B. 1.75 statt 175)."
         )
-    elif new_km is not None and letzter_km_stand is not None and new_km < letzter_km_stand:
-        st.error(
-            f"Kilometerstand ({new_km:.0f} km) liegt unter dem zuletzt erfassten Stand "
-            f"({letzter_km_stand:.0f} km). Ein Tachostand kann nicht sinken - bitte prüfen "
-            "oder den fehlerhaften Eintrag in der Historie korrigieren."
-        )
+    elif km_fehler:
+        st.sidebar.error(km_fehler)
     elif new_amount > 0:
         supabase.table("transactions").insert({
             "date": str(new_date),
@@ -126,109 +184,64 @@ if submitted:
             "km_stand": float(new_km) if new_km is not None else None,
             "preis_pro_liter": float(new_preis_pro_liter) if new_preis_pro_liter is not None else None,
         }).execute()
-        st.success("Transaktion dauerhaft in der Cloud gespeichert!")
-        st.rerun()
+        nach_schreibzugriff("Transaktion dauerhaft in der Cloud gespeichert!")
     else:
-        st.error("Bitte erst alle Felder gültig ausfüllen.")
+        st.sidebar.error("Bitte einen Betrag größer 0 eingeben.")
 
-# --- BERECHNUNG DER PROGNOSEMODELLE ---
-amounts = df.sort_values("date", ascending=True)["amount"].reset_index(drop=True)
+# --- BERECHNUNG DER PROGNOSEMODELLE (auf Wochenbasis) ---
+amounts = df["amount"]
 n_samples = len(amounts)
 
-# Alle bisherigen Transaktionen einbeziehen (kein festes Mini-Fenster mehr)
-window = n_samples
+weekly = weekly_amounts(df, heute)
+basis = complete_weeks(weekly, heute)
+if basis.empty:
+    # Noch keine abgeschlossene Woche: notgedrungen mit der laufenden rechnen
+    basis = weekly
 
-# 1. Simple Moving Average (SMA)
-sma = amounts.rolling(window=window).mean().iloc[-1]
-
-# 2. Weighted Moving Average (WMA)
-weights = np.arange(1, window + 1)
-wma = np.average(amounts.tail(window), weights=weights)
-
-# 3. Exponential Moving Average (EMA) - Glaettungsfaktor ueber Slider einstellbar
-ema = amounts.ewm(alpha=k_factor, adjust=False).mean().iloc[-1]
-
-# Prognose je nach gewaehltem Modus
-if mode == "SMA":
-    base_forecast = sma
-elif mode == "WMA":
-    base_forecast = wma
-else:
-    base_forecast = ema
+trend = forecast_trend(basis, mode, window, k_factor)
+base_forecast = float(trend.iloc[-1]) if not trend.empty else 0.0
 
 final_weekly_forecast = base_forecast * (1 + buffer_pct / 100.0)
 final_monthly_projection = (final_weekly_forecast * 52) / 12
 
 # --- DASHBOARD METRIKEN ---
 col1, col2, col3 = st.columns(3)
+puffer_text = f"{buffer_pct:+d}% Puffer" if buffer_pct != 0 else "Kein Puffer"
+modus_text = mode if mode == "EMA" else f"{mode}, {window_option if window else 'alle'} Wo."
 
 with col1:
-    st.metric(
-        label=f"Budget Kommende KW ({mode})",
-        value=f"{final_weekly_forecast:.2f} €",
-        delta=f"{buffer_pct:+d}% Puffer" if buffer_pct != 0 else "Kein Puffer"
-    )
+    st.metric(label=f"Budget kommende KW ({modus_text})", value=f"{final_weekly_forecast:.2f} €", delta=puffer_text)
 
 with col2:
-    st.metric(
-        label=f"Hochrechnung / Monat ({mode})",
-        value=f"{final_monthly_projection:.2f} €",
-        delta=f"{buffer_pct:+d}% Puffer" if buffer_pct != 0 else "Kein Puffer"
-    )
+    st.metric(label=f"Hochrechnung / Monat ({modus_text})", value=f"{final_monthly_projection:.2f} €", delta=puffer_text)
 
 with col3:
-    st.metric(
-        label="Gesamtausgaben",
-        value=f"{amounts.sum():.2f} €",
-        delta=f"{n_samples} Tankungen"
-    )
+    st.metric(label="Gesamtausgaben", value=f"{amounts.sum():.2f} €", delta=f"{n_samples} Tankungen")
 
 # --- VISUALISIERUNG (PLOTLY CHART) ---
 st.markdown("### Ausgabenverlauf & Prognosemodelle")
 
 fig = go.Figure()
 
-if not df.empty:
-    # Transaktionen zu Kalenderwochen (Montag-Sonntag) zusammenfassen, damit
-    # einzelne Tankbetraege nicht mehr als zackige Linie erscheinen. Wochen
-    # ohne Tankvorgang werden explizit mit 0 aufgefuellt, damit im Chart
-    # keine Luecke entsteht und die Trendlinie nicht ueber sie hinwegspringt.
-    week_start = (df["date"] - pd.to_timedelta(df["date"].dt.weekday, unit="D")).dt.normalize()
-    weekly_amounts = df.assign(week_start=week_start).groupby("week_start")["amount"].sum()
-    all_weeks = pd.date_range(weekly_amounts.index.min(), weekly_amounts.index.max(), freq="7D")
-    weekly_amounts = weekly_amounts.reindex(all_weeks, fill_value=0.0)
-
-    # Expandierende Prognose-Trendlinie: fuer jede Woche wird der Wert
-    # berechnet, den der gewaehlte Modus mit allen BIS DAHIN bekannten Wochen
-    # geliefert haette - kein fixes Rolling-Window wie zuvor.
-    if mode == "SMA":
-        trend = weekly_amounts.expanding().mean()
-    elif mode == "WMA":
-        def _expanding_wma(values):
-            w = np.arange(1, len(values) + 1)
-            return np.average(values, weights=w)
-        trend = weekly_amounts.expanding().apply(_expanding_wma, raw=True)
-    else:
-        trend = weekly_amounts.ewm(alpha=k_factor, adjust=False).mean()
-
-    # Balken: reale Ausgaben pro Kalenderwoche
+if not weekly.empty:
+    laufend = ~weekly.index.isin(basis.index)
     fig.add_trace(go.Bar(
-        x=weekly_amounts.index,
-        y=weekly_amounts.values,
+        x=weekly.index,
+        y=weekly.values,
         name="Reale Ausgaben pro KW (€)",
-        marker=dict(color="#38bdf8")
+        marker=dict(color=np.where(laufend, "rgba(56, 189, 248, 0.35)", "#38bdf8")),
+        hovertemplate="KW ab %{x|%d.%m.%Y}: %{y:.2f} €<extra></extra>",
     ))
 
-    # Glatte Linie: expandierender Prognose-Trend passend zum Sidebar-Modus
+    # Prognose-Trend: exakt dieselbe Berechnung wie die Metrik oben
     fig.add_trace(go.Scatter(
         x=trend.index,
         y=trend.values,
         mode="lines",
-        name=f"Prognose-Trend ({mode})",
+        name=f"Prognose-Trend ({modus_text})",
         line=dict(color="#f59e0b", width=2.5, shape="spline")
     ))
 
-    # Referenzlinie: aktuelles Wochenbudget inkl. Puffer
     fig.add_hline(
         y=final_weekly_forecast,
         line_dash="dash",
@@ -249,7 +262,9 @@ fig.update_layout(
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
+if not weekly.empty and laufend.any():
+    st.caption("Heller Balken = laufende Woche, fließt erst nach Wochenende in die Prognose ein.")
 
 # --- KILOMETER & VERBRAUCH ---
 st.markdown("### Kilometer & Verbrauch")
@@ -258,7 +273,7 @@ if df.empty:
     st.info("Keine Transaktionen vorhanden.")
 else:
     # Chronologische Kopie fuer die Verbrauchsberechnung.
-    verbrauch_df = df.sort_values("date", ascending=True).reset_index(drop=True)
+    verbrauch_df = df.iloc[::-1].reset_index(drop=True)
 
     # Liter pro Tankvorgang, nur wenn ein gueltiger Preis/Liter vorliegt.
     has_preis = verbrauch_df["preis_pro_liter"].notna() & (verbrauch_df["preis_pro_liter"] > 0)
@@ -305,7 +320,7 @@ else:
                 yaxis=dict(title="Kilometerstand (km)", gridcolor="#1e293b"),
                 showlegend=False
             )
-            st.plotly_chart(km_fig, use_container_width=True)
+            st.plotly_chart(km_fig, width="stretch")
 
     with verbrauch_col:
         st.markdown("**Verbrauch (L/100km) pro Tankvorgang**")
@@ -328,7 +343,7 @@ else:
                 yaxis=dict(title="L/100km", gridcolor="#1e293b"),
                 showlegend=False
             )
-            st.plotly_chart(verbrauch_fig, use_container_width=True)
+            st.plotly_chart(verbrauch_fig, width="stretch")
 
 # --- AUSGABEN AKTUELLER MONAT (EIN BALKEN, EIN SEGMENT PRO TANKVORGANG) ---
 st.markdown("### Ausgaben aktueller Monat")
@@ -342,84 +357,73 @@ SEGMENT_FARBEN = [
     "#facc15", "#60a5fa", "#fb923c", "#4ade80", "#c084fc"
 ]
 
-heute = datetime.today()
 monat_df = df[
     (df["date"].dt.year == heute.year) & (df["date"].dt.month == heute.month)
 ].sort_values("date").reset_index(drop=True)
 monatsname = f"{MONATSNAMEN[heute.month - 1]} {heute.year}"
 
+# Restprognose nur fuer die VERBLEIBENDEN Tage des Monats (heute eingeschlossen),
+# nicht "volle Monatshochrechnung minus bisher ausgegeben".
+tage_im_monat = calendar.monthrange(heute.year, heute.month)[1]
+resttage = tage_im_monat - heute.day + 1
+prognostizierter_rest = final_weekly_forecast / 7 * resttage
+ausgegeben_monat = monat_df["amount"].sum()
+erwartet_monat = ausgegeben_monat + prognostizierter_rest
+
 monat_chart_col, monat_info_col = st.columns([1, 3])
 
 with monat_chart_col:
-    if monat_df.empty:
-        st.info(f"Noch keine Tankvorgänge im {monatsname}.")
-    else:
-        ausgegeben_monat = monat_df["amount"].sum()
+    monat_fig = go.Figure()
+    for i, row in monat_df.iterrows():
+        monat_fig.add_trace(go.Bar(
+            x=[monatsname],
+            y=[row["amount"]],
+            marker=dict(color=SEGMENT_FARBEN[i % len(SEGMENT_FARBEN)]),
+            hovertemplate=f"{row['date'].strftime('%d.%m.%Y')}<br>{row['amount']:.2f} €<extra></extra>"
+        ))
 
-        monat_fig = go.Figure()
-        for i, row in monat_df.iterrows():
-            monat_fig.add_trace(go.Bar(
-                x=[monatsname],
-                y=[row["amount"]],
-                marker=dict(color=SEGMENT_FARBEN[i % len(SEGMENT_FARBEN)]),
-                hovertemplate=f"{row['date'].strftime('%d.%m.%Y')}<br>{row['amount']:.2f} €<extra></extra>"
-            ))
+    # Ausgegrauter Teil: was laut Prognose bis Monatsende noch dazukommt.
+    if prognostizierter_rest > 0:
+        monat_fig.add_trace(go.Bar(
+            x=[monatsname],
+            y=[prognostizierter_rest],
+            marker=dict(color="rgba(148, 163, 184, 0.35)"),
+            hovertemplate=f"Prognostizierter Rest ({resttage} Tage): {prognostizierter_rest:.2f} €<extra></extra>"
+        ))
 
-        # Ausgegrauter Teil: Rest der Monats-Hochrechnung (Sidebar-Modus + Puffer),
-        # der laut Prognose diesen Monat noch dazukommen duerfte.
-        prognostizierter_rest = max(final_monthly_projection - ausgegeben_monat, 0)
-        if prognostizierter_rest > 0:
-            monat_fig.add_trace(go.Bar(
-                x=[monatsname],
-                y=[prognostizierter_rest],
-                marker=dict(color="rgba(148, 163, 184, 0.35)"),
-                hovertemplate=f"Prognostizierter Rest ({mode}): {prognostizierter_rest:.2f} €<extra></extra>"
-            ))
-
-        monat_fig.update_layout(
-            barmode="stack",
-            template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            margin=dict(l=10, r=10, t=10, b=10),
-            xaxis=dict(visible=False),
-            yaxis=dict(title="€", gridcolor="#1e293b"),
-            showlegend=False,
-            bargap=0.55,
-            height=320
-        )
-        st.plotly_chart(monat_fig, use_container_width=True)
+    monat_fig.update_layout(
+        barmode="stack",
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=10, r=10, t=10, b=10),
+        xaxis=dict(visible=False),
+        yaxis=dict(title="€", gridcolor="#1e293b"),
+        showlegend=False,
+        bargap=0.55,
+        height=320
+    )
+    st.plotly_chart(monat_fig, width="stretch")
 
 with monat_info_col:
-    if not monat_df.empty:
-        st.metric(f"Bisher ausgegeben im {monatsname}", f"{ausgegeben_monat:.2f} €", delta=f"{len(monat_df)} Tankungen")
-        if prognostizierter_rest > 0:
-            st.caption(
-                f"Grau = prognostizierter Rest bis Monatsende ({mode}-Hochrechnung: "
-                f"{final_monthly_projection:.2f} € gesamt)."
-            )
-        else:
-            st.caption(f"Bereits über der {mode}-Monats-Hochrechnung von {final_monthly_projection:.2f} €.")
+    st.metric(f"Bisher ausgegeben im {monatsname}", f"{ausgegeben_monat:.2f} €", delta=f"{len(monat_df)} Tankungen")
+    st.caption(
+        f"Grau = prognostizierter Rest für die verbleibenden {resttage} Tage ({modus_text}). "
+        f"Erwartet für den ganzen Monat: {erwartet_monat:.2f} €."
+    )
 
 # --- ÖLWECHSEL-TRACKER ---
 st.markdown("### Ölwechsel-Tracker")
 
-def load_oil_settings():
-    try:
-        response = supabase.table("oil_change_settings").select("*").limit(1).execute()
-        return response.data[0] if response.data else {}
-    except Exception:
-        return None
+oil_result = load_oil_settings()
 
-oil_settings = load_oil_settings()
-
-if oil_settings is None:
+if not oil_result["ok"]:
     st.info(
-        "Für den Ölwechsel-Tracker wird eine zusätzliche Tabelle in Supabase benötigt, die noch "
-        "nicht existiert. Bitte das SQL-Snippet aus dem Chat in Supabase ausführen und die Seite "
-        "danach neu laden."
+        "Die Ölwechsel-Einstellungen konnten nicht geladen werden. Entweder fehlt die Tabelle "
+        "`oil_change_settings` in Supabase, oder die Verbindung ist gestört."
     )
-elif not oil_settings:
+    st.caption(f"Fehler: {oil_result['error']}")
+elif not oil_result["data"]:
     st.write("Noch keine Ölwechsel-Einstellungen hinterlegt.")
     with st.form("oil_setup_form"):
         setup_interval = st.number_input(
@@ -440,18 +444,19 @@ elif not oil_settings:
                 "interval_km": float(setup_interval),
                 "last_oil_change_km": float(letzter_km_stand - setup_vor_km),
             }).execute()
-            st.success("Ölwechsel-Einstellungen gespeichert.")
-            st.rerun()
+            nach_schreibzugriff("Ölwechsel-Einstellungen gespeichert.")
 else:
-    interval_km = oil_settings["interval_km"]
-    last_oil_change_km = oil_settings["last_oil_change_km"]
+    oil_settings = oil_result["data"]
+    interval_km = float(oil_settings["interval_km"])
+    last_oil_change_km = float(oil_settings["last_oil_change_km"])
     naechster_wechsel_km = last_oil_change_km + interval_km
 
     if letzter_km_stand is None:
         st.info("Noch kein Kilometerstand erfasst - Fortschritt kann nicht berechnet werden.")
     else:
         gefahren_seit_wechsel = max(letzter_km_stand - last_oil_change_km, 0)
-        rest_km = max(naechster_wechsel_km - letzter_km_stand, 0)
+        rest_km_roh = naechster_wechsel_km - letzter_km_stand
+        rest_km = max(rest_km_roh, 0)
         fortschritt_pct = min(gefahren_seit_wechsel / interval_km, 1.0) if interval_km > 0 else 0.0
 
         st.progress(fortschritt_pct)
@@ -467,34 +472,35 @@ else:
         else:
             st.metric("Noch verbleibende km bis zum Ölwechsel", f"{rest_km:.0f} km")
 
-        if rest_km <= 0:
-            st.warning("Der Ölwechsel ist überfällig!")
-
-        # Datum/KW-Prognose anhand der durchschnittlichen Fahrleistung. Gleitendes
-        # km-Fenster in Groesse des Oelwechselintervalls (statt der kompletten
-        # Historie), damit altes Fahrverhalten die Rate nicht dauerhaft verzerrt.
-        # Ist insgesamt weniger als ein Intervall an Historie vorhanden, bleibt
-        # der Filter wirkungslos und es wird automatisch die gesamte Historie
-        # verwendet - kein Sonderfall noetig.
-        km_fenster_start = max(letzter_km_stand - interval_km, 0)
-        km_history = df.dropna(subset=["km_stand"])
-        km_history = km_history[km_history["km_stand"] >= km_fenster_start].sort_values("date")
-        if len(km_history) >= 2:
-            zeitspanne_tage = (km_history["date"].iloc[-1] - km_history["date"].iloc[0]).days
-            km_differenz = km_history["km_stand"].iloc[-1] - km_history["km_stand"].iloc[0]
-            if zeitspanne_tage > 0 and km_differenz > 0:
-                km_pro_tag = km_differenz / zeitspanne_tage
-                tage_bis_wechsel = rest_km / km_pro_tag
-                prognose_datum = heute + pd.Timedelta(days=tage_bis_wechsel)
-                prognose_kw = prognose_datum.isocalendar()[1]
-                st.caption(
-                    f"Voraussichtlich fällig: ca. {prognose_datum.strftime('%d.%m.%Y')} (KW {prognose_kw}), "
-                    f"basierend auf ⌀ {km_pro_tag:.1f} km/Tag aus der Fahrhistorie."
-                )
-            else:
-                st.caption("Noch nicht genug Fahrdaten für eine Datums-Prognose.")
+        if rest_km_roh < 0:
+            st.warning(f"Der Ölwechsel ist seit {-rest_km_roh:.0f} km überfällig!")
+        elif rest_km_roh == 0:
+            st.warning("Der Ölwechsel ist jetzt fällig!")
         else:
-            st.caption("Noch nicht genug Fahrdaten für eine Datums-Prognose (mind. zwei Kilometerstände nötig).")
+            # Datum/KW-Prognose anhand der durchschnittlichen Fahrleistung. Gleitendes
+            # km-Fenster in Groesse des Oelwechselintervalls (statt der kompletten
+            # Historie), damit altes Fahrverhalten die Rate nicht dauerhaft verzerrt.
+            km_fenster_start = max(letzter_km_stand - interval_km, 0)
+            km_history = df.dropna(subset=["km_stand"])
+            km_history = km_history[km_history["km_stand"] >= km_fenster_start].sort_values("date")
+            if len(km_history) >= 2:
+                zeitspanne_tage = (km_history["date"].iloc[-1] - km_history["date"].iloc[0]).days
+                km_differenz = km_history["km_stand"].iloc[-1] - km_history["km_stand"].iloc[0]
+                if zeitspanne_tage > 0 and km_differenz > 0:
+                    km_pro_tag = km_differenz / zeitspanne_tage
+                    tage_bis_wechsel = rest_km / km_pro_tag
+                    # Ab dem Datum des letzten km-Stands rechnen, nicht ab heute -
+                    # seitdem gefahrene km sind ja noch nicht erfasst.
+                    prognose_datum = km_history["date"].iloc[-1] + pd.Timedelta(days=tage_bis_wechsel)
+                    prognose_kw = prognose_datum.isocalendar()[1]
+                    st.caption(
+                        f"Voraussichtlich fällig: ca. {prognose_datum.strftime('%d.%m.%Y')} (KW {prognose_kw}), "
+                        f"basierend auf ⌀ {km_pro_tag:.1f} km/Tag aus der Fahrhistorie."
+                    )
+                else:
+                    st.caption("Noch nicht genug Fahrdaten für eine Datums-Prognose.")
+            else:
+                st.caption("Noch nicht genug Fahrdaten für eine Datums-Prognose (mind. zwei Kilometerstände nötig).")
 
     with st.expander("Ölwechsel-Einstellungen ändern"):
         with st.form("oil_update_form"):
@@ -516,68 +522,72 @@ else:
                 if edit_vor_km is not None:
                     update_payload["last_oil_change_km"] = float(letzter_km_stand - edit_vor_km)
                 supabase.table("oil_change_settings").update(update_payload).eq("id", 1).execute()
-                st.success("Aktualisiert.")
-                st.rerun()
+                nach_schreibzugriff("Ölwechsel-Einstellungen aktualisiert.")
 
-# --- HISTORIE TABELLE: EINKLAPPBAR, PRO ZEILE EINZELN BEARBEITBAR ODER LÖSCHBAR ---
-history_df = df.sort_values("date", ascending=False).reset_index(drop=True)
+# --- HISTORIE: PRO ZEILE EINZELN BEARBEITBAR ODER LÖSCHBAR ---
+# Ein st.expander rendert seinen Inhalt auch im zugeklappten Zustand. Bei
+# 6 Widgets pro Zeile waren das schon bei 40 Tankungen ~240 Widgets, die bei
+# JEDEM Slider-Zug neu aufgebaut wurden. Per Toggle wird die Tabelle nur
+# gebaut, wenn sie wirklich angezeigt werden soll.
+st.markdown("---")
+history_df = df  # bereits absteigend nach Datum sortiert
 
-with st.expander(f"**Historie aller Transaktionen ({len(history_df)})**", expanded=False):
-    if history_df.empty:
-        st.info("Keine Transaktionen vorhanden.")
-    else:
-        header_col1, header_col2, header_col3, header_col4, header_col5, header_col6 = st.columns([2, 2, 2, 2, 1, 1])
-        header_col1.markdown("**Datum**")
-        header_col2.markdown("**Betrag**")
-        header_col3.markdown("**Kilometerstand**")
-        header_col4.markdown("**Preis/l**")
-        header_col5.markdown("**Speichern**")
-        header_col6.markdown("**Löschen**")
+if not st.toggle(f"**Historie aller Transaktionen ({len(history_df)}) bearbeiten**", key="show_history"):
+    pass
+elif history_df.empty:
+    st.info("Keine Transaktionen vorhanden.")
+else:
+    header_cols = st.columns([2, 2, 2, 2, 1, 1])
+    for col, titel in zip(header_cols, ["Datum", "Betrag", "Kilometerstand", "Preis/l", "Speichern", "Löschen"]):
+        col.markdown(f"**{titel}**")
 
-        for _, row in history_df.iterrows():
-            row_id = row["id"]
-            with st.form(f"edit_row_{row_id}", border=False):
-                c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 2, 1, 1])
-                edit_date = c1.date_input(
-                    "Datum", value=row["date"].date(), key=f"date_{row_id}", label_visibility="collapsed"
+    for _, row in history_df.iterrows():
+        row_id = row["id"]
+        with st.form(f"edit_row_{row_id}", border=False):
+            c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 2, 1, 1])
+            edit_date = c1.date_input(
+                "Datum", value=row["date"].date(), key=f"date_{row_id}",
+                label_visibility="collapsed", format="DD.MM.YYYY"
+            )
+            edit_amount = c2.number_input(
+                "Betrag", value=float(row["amount"]), min_value=0.0, step=0.01, format="%.2f",
+                key=f"amount_{row_id}", label_visibility="collapsed"
+            )
+            edit_km = c3.number_input(
+                "Kilometerstand",
+                value=(float(row["km_stand"]) if pd.notna(row["km_stand"]) else None),
+                min_value=0.0, step=1.0, format="%.0f",
+                key=f"km_{row_id}", label_visibility="collapsed"
+            )
+            edit_preis = c4.number_input(
+                "Preis/l",
+                value=(float(row["preis_pro_liter"]) if pd.notna(row["preis_pro_liter"]) else None),
+                min_value=0.0, step=0.001, format="%.3f",
+                key=f"preis_{row_id}", label_visibility="collapsed"
+            )
+            save_clicked = c5.form_submit_button("💾")
+            delete_clicked = c6.form_submit_button("🗑️")
+
+        if save_clicked:
+            km_fehler = km_conflict(df, pd.Timestamp(edit_date), edit_km, exclude_id=row_id)
+            if edit_preis is not None and edit_preis > 5:
+                st.error(
+                    f"Preis pro Liter von {edit_preis:.3f} € wirkt unrealistisch hoch. "
+                    "Bitte in Euro angeben (z. B. 1.75 statt 175)."
                 )
-                edit_amount = c2.number_input(
-                    "Betrag", value=float(row["amount"]), min_value=0.0, step=0.01, format="%.2f",
-                    key=f"amount_{row_id}", label_visibility="collapsed"
-                )
-                edit_km = c3.number_input(
-                    "Kilometerstand",
-                    value=(float(row["km_stand"]) if pd.notna(row["km_stand"]) else None),
-                    min_value=0.0, step=1.0, format="%.0f",
-                    key=f"km_{row_id}", label_visibility="collapsed"
-                )
-                edit_preis = c4.number_input(
-                    "Preis/l",
-                    value=(float(row["preis_pro_liter"]) if pd.notna(row["preis_pro_liter"]) else None),
-                    min_value=0.0, step=0.001, format="%.3f",
-                    key=f"preis_{row_id}", label_visibility="collapsed"
-                )
-                save_clicked = c5.form_submit_button("💾")
-                delete_clicked = c6.form_submit_button("🗑️")
+            elif km_fehler:
+                st.error(km_fehler)
+            elif edit_amount <= 0:
+                st.error("Betrag muss größer als 0 sein.")
+            else:
+                supabase.table("transactions").update({
+                    "date": str(edit_date),
+                    "amount": float(edit_amount),
+                    "km_stand": float(edit_km) if edit_km is not None else None,
+                    "preis_pro_liter": float(edit_preis) if edit_preis is not None else None,
+                }).eq("id", row_id).execute()
+                nach_schreibzugriff("Eintrag aktualisiert.")
 
-            if save_clicked:
-                if edit_preis is not None and edit_preis > 5:
-                    st.error(
-                        f"Preis pro Liter von {edit_preis:.3f} € wirkt unrealistisch hoch. "
-                        "Bitte in Euro angeben (z. B. 1.75 statt 175)."
-                    )
-                elif edit_amount <= 0:
-                    st.error("Betrag muss größer als 0 sein.")
-                else:
-                    supabase.table("transactions").update({
-                        "date": str(edit_date),
-                        "amount": float(edit_amount),
-                        "km_stand": float(edit_km) if edit_km is not None else None,
-                        "preis_pro_liter": float(edit_preis) if edit_preis is not None else None,
-                    }).eq("id", row_id).execute()
-                    st.success("Eintrag aktualisiert.")
-                    st.rerun()
-
-            if delete_clicked:
-                supabase.table("transactions").delete().eq("id", row_id).execute()
-                st.rerun()
+        if delete_clicked:
+            supabase.table("transactions").delete().eq("id", row_id).execute()
+            nach_schreibzugriff("Eintrag gelöscht.")
