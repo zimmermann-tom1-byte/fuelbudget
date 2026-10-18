@@ -139,3 +139,109 @@ def km_conflict(df: pd.DataFrame, date: pd.Timestamp, km: float | None, exclude_
             f"({after.min():.0f} km). Bitte Datum oder Kilometerstand prüfen."
         )
     return None
+
+
+# --- AUTOMATIK: Parameterwahl per Backtesting ---------------------------------
+
+AUTO_FENSTER = [4, 8, 12, 26, None]          # SMA/WMA, None = alle Wochen
+AUTO_K = [0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50]
+AUTO_MIN_TRAIN = 8      # Wochen "Anlauf", bevor eine Prognose bewertet wird
+AUTO_HORIZONT = 4       # bewertet wird die Summe ueber 4 Wochen (~ 1 Monat)
+AUTO_ZIEL = 0.80        # Budget soll in 80 % der 4-Wochen-Zeitraeume reichen
+AUTO_HALBWERTSZEIT = 8  # Gewicht eines Testzeitraums halbiert sich alle 8 Wochen
+
+
+def _gewichtetes_quantil(werte: np.ndarray, gewichte: np.ndarray, q: float) -> float:
+    order = np.argsort(werte)
+    w, g = werte[order], gewichte[order]
+    kum = np.cumsum(g) / g.sum()
+    return float(w[np.searchsorted(kum, q)])
+
+
+def kandidaten() -> list[dict]:
+    out = []
+    for mode in ("SMA", "WMA"):
+        for w in AUTO_FENSTER:
+            out.append({"mode": mode, "window": w, "k": None,
+                        "label": f"{mode}, {'alle' if w is None else w} Wochen"})
+    for k in AUTO_K:
+        out.append({"mode": "EMA", "window": None, "k": k, "label": f"EMA, K = {k:.2f}"})
+    return out
+
+
+def _fenster_auswertung(weekly: pd.Series, pred: pd.Series, min_train: int, horizont: int) -> pd.DataFrame:
+    """Fuer jeden Startpunkt t: Prognose (nur Daten VOR t) mal horizont gegen
+    die tatsaechliche Summe der Wochen t .. t+horizont-1."""
+    rows = []
+    for t in range(min_train, len(weekly) - horizont + 1):
+        prognose = float(pred.iloc[t]) * horizont
+        ist = float(weekly.iloc[t:t + horizont].sum())
+        rows.append({"start": weekly.index[t], "prognose": prognose, "ist": ist, "fehler": ist - prognose})
+    return pd.DataFrame(rows)
+
+
+def auto_select(weekly: pd.Series, min_train: int = AUTO_MIN_TRAIN,
+                horizont: int = AUTO_HORIZONT, ziel: float = AUTO_ZIEL,
+                halbwertszeit: float = AUTO_HALBWERTSZEIT) -> dict | None:
+    """Testet alle Kandidaten rueckwirkend und waehlt den mit dem kleinsten
+    gewichteten mittleren absoluten Fehler (MAE) der 4-Wochen-Prognose.
+    Juengere Testzeitraeume zaehlen mehr (Halbwertszeit), damit sich die
+    Automatik an veraendertes Fahrverhalten anpasst. Der Puffer wird so gesetzt,
+    dass das Budget in `ziel` der (gewichteten) Testzeitraeume gereicht haette.
+
+    Gibt None zurueck, wenn zu wenige abgeschlossene Wochen vorliegen.
+    """
+    if len(weekly) < min_train + horizont:
+        return None
+
+    ergebnisse = []
+    for c in kandidaten():
+        trend = forecast_trend(weekly, c["mode"], c["window"], c["k"] or 0.0)
+        pred = trend.shift(1)  # Prognose fuer Woche t kennt nur Wochen < t
+        f = _fenster_auswertung(weekly, pred, min_train, horizont)
+        alter = np.arange(len(f))[::-1]               # 0 = juengster Testzeitraum
+        f["gewicht"] = 0.5 ** (alter / halbwertszeit)
+        ergebnisse.append({
+            **c,
+            "mae": float(np.average(f["fehler"].abs(), weights=f["gewicht"])),
+            "rmse": float(np.sqrt(np.average(f["fehler"] ** 2, weights=f["gewicht"]))),
+            "bias": float(np.average(f["fehler"], weights=f["gewicht"])),
+            "aktuell": float(trend.iloc[-1]),
+            "_fenster": f,
+        })
+
+    ranking = pd.DataFrame(ergebnisse).sort_values(["mae", "rmse"]).reset_index(drop=True)
+    best = ranking.iloc[0]
+    fenster = best["_fenster"]
+
+    gueltig = fenster[fenster["prognose"] > 0]
+    verhaeltnis = (gueltig["ist"] / gueltig["prognose"]).to_numpy()
+    gew = gueltig["gewicht"].to_numpy()
+    if len(verhaeltnis) == 0:
+        q, puffer, reicht = 1.0, 0, float("nan")
+    else:
+        q = _gewichtetes_quantil(verhaeltnis, gew, ziel)
+        puffer = int(np.clip(np.ceil((q - 1) * 100 - 1e-9), -10, 100))
+        reicht = float(np.average(verhaeltnis <= 1 + puffer / 100, weights=gew))
+
+    return {
+        "mode": best["mode"],
+        "window": None if pd.isna(best["window"]) else int(best["window"]),
+        "k": None if pd.isna(best["k"]) else float(best["k"]),
+        "label": best["label"],
+        "mae": float(best["mae"]),
+        "rmse": float(best["rmse"]),
+        "bias": float(best["bias"]),
+        "puffer": puffer,
+        "quantil": q,
+        "reicht_quote": reicht,
+        "verhaeltnisse": verhaeltnis,
+        "fenster": fenster,
+        "ranking": ranking.drop(columns="_fenster"),
+        "n_wochen": len(weekly),
+        "n_tests": len(fenster),
+        "min_train": min_train,
+        "horizont": horizont,
+        "ziel": ziel,
+        "halbwertszeit": halbwertszeit,
+    }

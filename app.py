@@ -17,7 +17,10 @@ import forecast
 # (-> ImportError bei neuen Funktionen). Reload kostet bei dieser Dateigroesse
 # praktisch nichts.
 importlib.reload(forecast)
-from forecast import complete_weeks, forecast_trend, km_conflict, verbrauch_intervalle, weekly_amounts  # noqa: E402
+from forecast import (  # noqa: E402
+    AUTO_HORIZONT, AUTO_MIN_TRAIN, auto_select, complete_weeks, forecast_trend,
+    km_conflict, verbrauch_intervalle, weekly_amounts,
+)
 
 # --- PAGE CONFIGURATION (muss der erste Streamlit-Aufruf sein) ---
 st.set_page_config(
@@ -117,10 +120,22 @@ with st.sidebar.form("add_transaction_form", clear_on_submit=True):
 st.sidebar.markdown("---")
 st.sidebar.header("Prognose-Parameter")
 
-mode = st.sidebar.selectbox("Berechnungsmodus", ["EMA", "SMA", "WMA"], index=0, key="mode_select")
+# Werte ausgeblendeter Regler behalten (sonst setzt Streamlit sie zurueck,
+# solange der Automatikmodus aktiv ist und die Regler nicht gezeichnet werden).
+# Defaults daher ueber session_state statt value= setzen (beides zusammen
+# loest in Streamlit eine Warnung aus).
+for _key, _default in (("window_slider", 12), ("k_factor_slider", 0.15), ("buffer_pct_slider", 10)):
+    st.session_state[_key] = st.session_state.get(_key, _default)
+
+mode = st.sidebar.selectbox(
+    "Berechnungsmodus", ["Automatisch", "EMA", "SMA", "WMA"], index=0, key="mode_select"
+)
+auto = mode == "Automatisch"
 with st.sidebar.popover("ℹ️ Was bedeutet das & welchen Modus wähle ich?", width="stretch"):
     st.markdown("""
 **Grundlage:** Gerechnet wird mit deinen Ausgaben **pro Kalenderwoche** – nicht pro Tankvorgang. Fährst du mehr, tankst du öfter, und genau das soll die Prognose sehen. Die laufende Woche zählt erst mit, wenn sie abgeschlossen ist.
+
+**Automatisch:** Das Tool testet alle Modi und Einstellungen rückwirkend an deinen eigenen Daten, nimmt die treffsicherste und berechnet den Puffer aus den bisherigen Prognosefehlern. Wie und warum, siehst du im Fenster „So arbeitet die Automatik“ unter den Kennzahlen.
 
 **SMA – Simple Moving Average:** Jede Woche im Betrachtungszeitraum zählt gleich viel. → Robuste, schwankungsarme Referenz, wenn dein Fahrverhalten stabil ist.
 
@@ -129,13 +144,17 @@ with st.sidebar.popover("ℹ️ Was bedeutet das & welchen Modus wähle ich?", w
 **EMA – Exponential Moving Average:** Neuere Wochen werden exponentiell stärker gewichtet, gesteuert über K. → Die beste Wahl, wenn sich dein Fahrverhalten öfter ändert und die Prognose zeitnah mitziehen soll.
 """)
 
-window_option = st.sidebar.select_slider(
-    "Betrachtungszeitraum (Wochen, nur SMA/WMA)",
-    options=[4, 8, 12, 26, 52, "Alle"], value=12, key="window_slider",
-    disabled=(mode == "EMA"),
-)
-with st.sidebar.popover("ℹ️ Warum ein Zeitraum?", width="stretch"):
-    st.markdown("""
+if auto:
+    st.sidebar.caption("Zeitraum, K und Puffer werden automatisch gewählt.")
+    window_option, k_factor, buffer_pct = None, None, None
+else:
+    window_option = st.sidebar.select_slider(
+        "Betrachtungszeitraum (Wochen, nur SMA/WMA)",
+        options=[4, 8, 12, 26, 52, "Alle"], key="window_slider",
+        disabled=(mode == "EMA"),
+    )
+    with st.sidebar.popover("ℹ️ Warum ein Zeitraum?", width="stretch"):
+        st.markdown("""
 **Das Grundproblem:** Bei einem Durchschnitt über *alle* Wochen hat jede neue Woche immer weniger Gewicht. Nach einem Jahr verschiebt eine einzelne Woche die Prognose kaum noch – die Prognose wird mit jeder Woche träger.
 
 **Kurzer Zeitraum (4–8 Wochen):** Zieht schnell mit, wenn du mehr oder weniger fährst, schwankt aber stärker.
@@ -143,12 +162,12 @@ with st.sidebar.popover("ℹ️ Warum ein Zeitraum?", width="stretch"):
 **Langer Zeitraum (26 Wochen bis „Alle“):** Sehr ruhig, merkt Veränderungen aber erst spät.
 """)
 
-k_factor = st.sidebar.slider(
-    "Glättungsfaktor K (nur EMA)", min_value=0.01, max_value=1.0, value=0.15, step=0.01,
-    key="k_factor_slider", disabled=(mode != "EMA"),
-)
-with st.sidebar.popover("ℹ️ Was steuert dieser Regler?", width="stretch"):
-    st.markdown("""
+    k_factor = st.sidebar.slider(
+        "Glättungsfaktor K (nur EMA)", min_value=0.01, max_value=1.0, step=0.01,
+        key="k_factor_slider", disabled=(mode != "EMA"),
+    )
+    with st.sidebar.popover("ℹ️ Was steuert dieser Regler?", width="stretch"):
+        st.markdown("""
 **Das Grundproblem:** Bei EMA muss festgelegt werden, *wie schnell* "schnell reagieren" genau bedeutet – genau das steuert K. Er bestimmt die Balance zwischen Stabilität und Reaktionsgeschwindigkeit.
 
 **Hoher K-Wert (nah an 1,0):** Fast nur die letzte Woche zählt. Die Prognose "springt" stark mit – reagiert sofort auf Veränderungen, ist aber anfällig für einzelne ungewöhnliche Wochen.
@@ -158,9 +177,9 @@ with st.sidebar.popover("ℹ️ Was steuert dieser Regler?", width="stretch"):
 Faustregel: K ≈ 2 / (Anzahl Wochen + 1). K = 0,15 entspricht also grob den letzten 12 Wochen.
 """)
 
-buffer_pct = st.sidebar.slider("Sicherheitspuffer (%)", min_value=-10, max_value=100, value=10, step=1, key="buffer_pct_slider")
-with st.sidebar.popover("ℹ️ Wozu dient dieser Puffer?", width="stretch"):
-    st.markdown("""
+    buffer_pct = st.sidebar.slider("Sicherheitspuffer (%)", min_value=-10, max_value=100, step=1, key="buffer_pct_slider")
+    with st.sidebar.popover("ℹ️ Wozu dient dieser Puffer?", width="stretch"):
+        st.markdown("""
 **Das Grundproblem:** Der berechnete SMA-/WMA-/EMA-Wert ist eine reine statistische Erwartung – es ist kein Sicherheitsspielraum für Unvorhergesehenes eingerechnet. Der Puffer erlaubt dir, diesen Erwartungswert bewusst nach oben oder unten zu verschieben.
 
 **Positiver Puffer:** Schafft eine Sicherheitsmarge nach oben – sinnvoll, wenn du lieber etwas mehr Budget einplanst, falls unerwartet mehr gefahren wird oder die Spritpreise steigen, statt am Monatsende negativ überrascht zu werden.
@@ -168,7 +187,7 @@ with st.sidebar.popover("ℹ️ Wozu dient dieser Puffer?", width="stretch"):
 **Negativer Puffer:** Setzt bewusst ein knapperes Budget an, als der statistische Durchschnitt nahelegt – sinnvoll als Sparziel, oder wenn du weißt, dass du künftig strukturell weniger fahren wirst (z. B. Fahrgemeinschaft, Homeoffice), die historischen Daten das aber noch nicht widerspiegeln.
 """)
 
-window = None if window_option == "Alle" else int(window_option)
+window = None if window_option in (None, "Alle") else int(window_option)
 
 # Neue Transaktion direkt in Supabase speichern
 vorhandene_km = df["km_stand"].dropna()
@@ -207,7 +226,22 @@ if basis.empty:
     # Noch keine abgeschlossene Woche: notgedrungen mit der laufenden rechnen
     basis = weekly
 
-trend = forecast_trend(basis, mode, window, k_factor)
+auto_result = None
+if auto:
+    auto_result = auto_select(basis)
+    if auto_result is not None:
+        eff_mode, window = auto_result["mode"], auto_result["window"]
+        k_factor, buffer_pct = auto_result["k"], auto_result["puffer"]
+        modus_text = f"Auto: {auto_result['label']}"
+    else:
+        # Zu wenig Historie fuer einen fairen Test: bewaehrter Standard
+        eff_mode, window, k_factor, buffer_pct = "EMA", None, 0.15, 10
+        modus_text = "Auto: Standard EMA, K = 0.15"
+else:
+    eff_mode = mode
+    modus_text = mode if mode == "EMA" else f"{mode}, {window_option if window else 'alle'} Wo."
+
+trend = forecast_trend(basis, eff_mode, window, k_factor or 0.15)
 base_forecast = float(trend.iloc[-1]) if not trend.empty else 0.0
 
 final_weekly_forecast = base_forecast * (1 + buffer_pct / 100.0)
@@ -216,7 +250,6 @@ final_monthly_projection = (final_weekly_forecast * 52) / 12
 # --- DASHBOARD METRIKEN ---
 col1, col2, col3 = st.columns(3)
 puffer_text = f"{buffer_pct:+d}% Puffer" if buffer_pct != 0 else "Kein Puffer"
-modus_text = mode if mode == "EMA" else f"{mode}, {window_option if window else 'alle'} Wo."
 
 with col1:
     st.metric(label=f"Budget kommende KW ({modus_text})", value=f"{final_weekly_forecast:.2f} €", delta=puffer_text)
@@ -226,6 +259,102 @@ with col2:
 
 with col3:
     st.metric(label="Gesamtausgaben", value=f"{amounts.sum():.2f} €", delta=f"{n_samples} Tankungen")
+
+# --- TRANSPARENZ: SO ARBEITET DIE AUTOMATIK ---
+if auto:
+    with st.expander("🔍 So arbeitet die Automatik – gewählte Parameter & Begründung"):
+        if auto_result is None:
+            st.info(
+                f"Für einen fairen Rückblick-Test braucht die Automatik mindestens "
+                f"{AUTO_MIN_TRAIN + AUTO_HORIZONT} abgeschlossene Wochen, vorhanden sind {len(basis)}. "
+                "Bis dahin nutzt sie den bewährten Standard EMA mit K = 0,15 und 10 % Puffer."
+            )
+        else:
+            a = auto_result
+            rk = a["ranking"]
+            zweiter = rk.iloc[1]
+            abstand = (zweiter["mae"] - a["mae"]) / a["mae"] * 100
+
+            p1, p2, p3 = st.columns(3)
+            p1.metric("Gewähltes Modell", a["label"])
+            p2.metric("Puffer", f"{a['puffer']:+d} %")
+            p3.metric("⌀ Fehler (4 Wochen)", f"{a['mae']:.2f} €")
+
+            st.markdown(f"""
+**Kurz gesagt:** Von {len(rk)} getesteten Einstellungen hätte **{a['label']}** deine tatsächlichen
+4-Wochen-Ausgaben in der Vergangenheit am genauesten vorhergesagt – im gewichteten Mittel
+**{a['mae']:.2f} €** daneben. Der Puffer von **{a['puffer']:+d} %** sorgt dafür, dass das Budget in
+**{a['reicht_quote'] * 100:.0f} %** der getesteten Zeiträume gereicht hätte (Ziel: {a['ziel'] * 100:.0f} %).
+
+Grundlage: {a['n_wochen']} abgeschlossene Wochen, davon {a['min_train']} als Anlauf,
+{a['n_tests']} Testzeiträume à {a['horizont']} Wochen.
+""")
+            if abstand < 5:
+                st.caption(
+                    f"Hinweis: Platz 2 ({zweiter['label']}) liegt nur {abstand:.1f} % dahinter – die Modelle sind "
+                    "praktisch gleich gut. Die Wahl kann daher mit neuen Daten zwischen beiden wechseln."
+                )
+            if a["bias"] > 0:
+                st.caption(f"Bias {a['bias']:+.2f} €: Das Modell hat im Mittel eher **zu wenig** prognostiziert – der Puffer gleicht das aus.")
+            else:
+                st.caption(f"Bias {a['bias']:+.2f} €: Das Modell hat im Mittel eher **zu viel** prognostiziert.")
+
+            st.markdown("##### Schritt 1 – Rückblick-Test (Backtesting)")
+            st.markdown(
+                "Für jede vergangene Woche *t* wird so getan, als wären nur die Wochen **davor** bekannt. "
+                "Jedes Modell macht damit seine Wochenprognose $\\hat y_t$, die mit 4 multipliziert gegen "
+                "die tatsächliche Summe der nächsten 4 Wochen verglichen wird:"
+            )
+            st.latex(r"e_t = \sum_{i=0}^{3} y_{t+i} \;-\; 4\,\hat y_t")
+            st.markdown("##### Schritt 2 – Jüngere Fehler zählen mehr")
+            st.markdown(
+                f"Damit sich die Automatik an verändertes Fahrverhalten anpasst, halbiert sich das Gewicht eines "
+                f"Testzeitraums alle {a['halbwertszeit']:.0f} Wochen ($a_t$ = Alter in Wochen):"
+            )
+            st.latex(rf"w_t = 0{{,}}5^{{\,a_t/{a['halbwertszeit']:.0f}}} \qquad "
+                     r"\text{gMAE} = \frac{\sum_t w_t\,|e_t|}{\sum_t w_t}")
+            st.markdown("Das Modell mit dem kleinsten gMAE gewinnt (bei Gleichstand entscheidet der RMSE).")
+
+            tabelle = rk.head(8)[["label", "mae", "rmse", "bias", "aktuell"]].rename(columns={
+                "label": "Modell", "mae": "gMAE (€)", "rmse": "RMSE (€)",
+                "bias": "Bias (€)", "aktuell": "Prognose/Woche heute (€)",
+            })
+            tabelle.index = range(1, len(tabelle) + 1)
+            st.dataframe(tabelle.round(2), width="stretch")
+
+            st.markdown("##### Schritt 3 – Puffer aus den Prognosefehlern")
+            st.markdown(
+                "Für jeden Testzeitraum wird das Verhältnis Ist zu Prognose gebildet. Der Puffer ist das "
+                f"(gewichtete) {a['ziel'] * 100:.0f}-%-Quantil dieser Verhältnisse, aufgerundet:"
+            )
+            st.latex(rf"r_t = \frac{{\sum_{{i=0}}^{{3}} y_{{t+i}}}}{{4\,\hat y_t}} \qquad "
+                     rf"\text{{Puffer}} = \left\lceil \left(q_{{{a['ziel']:.2f}}}(r) - 1\right)\cdot 100 \right\rceil "
+                     rf"= \lceil ({a['quantil']:.3f} - 1)\cdot 100 \rceil = {a['puffer']}\,\%")
+            st.caption("Begrenzt auf −10 % bis +100 %, wie beim manuellen Regler.")
+
+            f = a["fenster"]
+            bt_fig = go.Figure()
+            bt_fig.add_trace(go.Bar(
+                x=f["start"], y=f["ist"], name="Ist (4 Wochen)", marker=dict(color="#38bdf8"),
+                hovertemplate="ab %{x|%d.%m.%Y}: %{y:.2f} €<extra></extra>",
+            ))
+            bt_fig.add_trace(go.Scatter(
+                x=f["start"], y=f["prognose"], mode="lines", name="Prognose",
+                line=dict(color="#94a3b8", width=2, dash="dot"),
+            ))
+            bt_fig.add_trace(go.Scatter(
+                x=f["start"], y=f["prognose"] * (1 + a["puffer"] / 100), mode="lines",
+                name=f"Prognose + {a['puffer']} % Puffer", line=dict(color="#f59e0b", width=2.5),
+            ))
+            bt_fig.update_layout(
+                template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=20, r=20, t=30, b=20), height=320,
+                xaxis=dict(title="Beginn des 4-Wochen-Zeitraums", gridcolor="#1e293b"),
+                yaxis=dict(title="€", gridcolor="#1e293b"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.markdown(f"**Rückblick-Test von {a['label']}:** Wo der blaue Balken über der orangen Linie liegt, hätte das Budget nicht gereicht.")
+            st.plotly_chart(bt_fig, width="stretch")
 
 # --- VISUALISIERUNG (PLOTLY CHART) ---
 st.markdown("### Ausgabenverlauf & Prognosemodelle")
