@@ -318,13 +318,13 @@ else:
         else:
             gesamt_verbrauch = verbrauch_chart_df["liter"].sum() / verbrauch_chart_df["gefahrene_km"].sum() * 100
             verbrauch_fig = go.Figure()
-            # Einzelwerte nur blass: wer nicht jedes Mal volltankt, bekommt hier
-            # zwangslaeufig Ausreisser (zu viel/zu wenig Liter fuer die Strecke).
+            # Es wird immer vollgetankt -> jeder Einzelwert ist exakt (getankte
+            # Liter = seit der letzten Tankung verbrauchte Liter).
             verbrauch_fig.add_trace(go.Bar(
                 x=verbrauch_chart_df["date"],
                 y=verbrauch_chart_df["verbrauch"],
                 name="Pro Tankvorgang",
-                marker=dict(color="rgba(245, 158, 11, 0.35)"),
+                marker=dict(color="#f59e0b"),
                 customdata=verbrauch_chart_df[["gefahrene_km", "liter"]].to_numpy(),
                 hovertemplate="%{x|%d.%m.%Y}: %{y:.2f} L/100km<br>%{customdata[0]:.0f} km, %{customdata[1]:.1f} L<extra></extra>",
             ))
@@ -332,9 +332,9 @@ else:
                 x=verbrauch_chart_df["date"],
                 y=verbrauch_chart_df["verbrauch_gleitend"],
                 mode="lines+markers",
-                name="Gleitend (≥ 1000 km)",
-                line=dict(color="#f59e0b", width=2.5),
-                marker=dict(size=5),
+                name="Trend (≥ 1000 km)",
+                line=dict(color="#e2e8f0", width=2),
+                marker=dict(size=4),
                 hovertemplate="%{x|%d.%m.%Y}: %{y:.2f} L/100km (gleitend)<extra></extra>",
             ))
             verbrauch_fig.add_hline(
