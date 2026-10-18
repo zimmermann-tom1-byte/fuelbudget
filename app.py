@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from supabase import create_client
 
-from forecast import complete_weeks, forecast_trend, km_conflict, weekly_amounts
+from forecast import complete_weeks, forecast_trend, km_conflict, verbrauch_intervalle, weekly_amounts
 
 # --- PAGE CONFIGURATION (muss der erste Streamlit-Aufruf sein) ---
 st.set_page_config(
@@ -272,28 +272,8 @@ st.markdown("### Kilometer & Verbrauch")
 if df.empty:
     st.info("Keine Transaktionen vorhanden.")
 else:
-    # Chronologische Kopie fuer die Verbrauchsberechnung.
-    verbrauch_df = df.iloc[::-1].reset_index(drop=True)
-
-    # Liter pro Tankvorgang, nur wenn ein gueltiger Preis/Liter vorliegt.
-    has_preis = verbrauch_df["preis_pro_liter"].notna() & (verbrauch_df["preis_pro_liter"] > 0)
-    verbrauch_df["liter"] = np.where(has_preis, verbrauch_df["amount"] / verbrauch_df["preis_pro_liter"], np.nan)
-
-    # Gefahrene km seit der chronologisch vorherigen Tankung MIT km_stand
-    # (Tankungen ohne km_stand werden dabei uebersprungen, nicht als 0 gewertet).
-    km_mask = verbrauch_df["km_stand"].notna()
-    km_diffs = verbrauch_df.loc[km_mask, "km_stand"].diff()
-    verbrauch_df["gefahrene_km"] = np.nan
-    verbrauch_df.loc[km_diffs.index, "gefahrene_km"] = km_diffs
-
-    # Verbrauch in L/100km, nur wenn Liter und gefahrene km vorhanden und > 0.
-    has_verbrauch = verbrauch_df["liter"].notna() & verbrauch_df["gefahrene_km"].notna() & (verbrauch_df["gefahrene_km"] > 0)
-    verbrauch_df["verbrauch_l_100km"] = np.where(
-        has_verbrauch, (verbrauch_df["liter"] / verbrauch_df["gefahrene_km"]) * 100, np.nan
-    )
-
-    km_chart_df = verbrauch_df.dropna(subset=["km_stand"])
-    verbrauch_chart_df = verbrauch_df.dropna(subset=["verbrauch_l_100km"])
+    km_chart_df = df.dropna(subset=["km_stand"]).sort_values("date")
+    verbrauch_chart_df = verbrauch_intervalle(df, fenster_km=1000)
 
     km_col, verbrauch_col = st.columns(2)
 
@@ -323,25 +303,44 @@ else:
             st.plotly_chart(km_fig, width="stretch")
 
     with verbrauch_col:
-        st.markdown("**Verbrauch (L/100km) pro Tankvorgang**")
+        st.markdown("**Verbrauch (L/100km)**")
         if verbrauch_chart_df.empty:
             st.info("Noch nicht genug Daten für eine Verbrauchsberechnung (Preis/Liter und mind. zwei Kilometerstände nötig).")
         else:
+            gesamt_verbrauch = verbrauch_chart_df["liter"].sum() / verbrauch_chart_df["gefahrene_km"].sum() * 100
             verbrauch_fig = go.Figure()
+            # Einzelwerte nur blass: wer nicht jedes Mal volltankt, bekommt hier
+            # zwangslaeufig Ausreisser (zu viel/zu wenig Liter fuer die Strecke).
             verbrauch_fig.add_trace(go.Bar(
                 x=verbrauch_chart_df["date"],
-                y=verbrauch_chart_df["verbrauch_l_100km"],
-                name="Verbrauch (L/100km)",
-                marker=dict(color="#f59e0b")
+                y=verbrauch_chart_df["verbrauch"],
+                name="Pro Tankvorgang",
+                marker=dict(color="rgba(245, 158, 11, 0.35)"),
+                customdata=verbrauch_chart_df[["gefahrene_km", "liter"]].to_numpy(),
+                hovertemplate="%{x|%d.%m.%Y}: %{y:.2f} L/100km<br>%{customdata[0]:.0f} km, %{customdata[1]:.1f} L<extra></extra>",
             ))
+            verbrauch_fig.add_trace(go.Scatter(
+                x=verbrauch_chart_df["date"],
+                y=verbrauch_chart_df["verbrauch_gleitend"],
+                mode="lines+markers",
+                name="Gleitend (≥ 1000 km)",
+                line=dict(color="#f59e0b", width=2.5),
+                marker=dict(size=5),
+                hovertemplate="%{x|%d.%m.%Y}: %{y:.2f} L/100km (gleitend)<extra></extra>",
+            ))
+            verbrauch_fig.add_hline(
+                y=gesamt_verbrauch, line_dash="dash", line_color="#64748b", line_width=1.5,
+                annotation_text=f"⌀ {gesamt_verbrauch:.2f}", annotation_position="top left",
+                annotation_font_color="#94a3b8",
+            )
             verbrauch_fig.update_layout(
                 template="plotly_dark",
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
                 margin=dict(l=20, r=20, t=20, b=20),
                 xaxis=dict(title="Datum", gridcolor="#1e293b"),
-                yaxis=dict(title="L/100km", gridcolor="#1e293b"),
-                showlegend=False
+                yaxis=dict(title="L/100km", gridcolor="#1e293b", rangemode="tozero"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             )
             st.plotly_chart(verbrauch_fig, width="stretch")
 

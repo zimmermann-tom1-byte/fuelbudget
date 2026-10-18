@@ -67,6 +67,52 @@ def forecast_trend(weekly: pd.Series, mode: str, window: int | None, k: float) -
     return weekly.ewm(alpha=k, adjust=False).mean()
 
 
+def verbrauch_intervalle(df: pd.DataFrame, fenster_km: float = 1000.0) -> pd.DataFrame:
+    """Verbrauch je Intervall zwischen zwei km-Staenden plus gleitender Verbrauch.
+
+    - Liter von Tankungen OHNE km_stand werden dem naechsten Intervall
+      zugeschlagen (vorher gingen sie verloren -> Verbrauch zu niedrig).
+    - Fehlt in einem Intervall ein Preis, ist dessen Literzahl unbekannt und
+      das Intervall wird verworfen.
+    - Einzelwerte schwanken stark, sobald nicht jedes Mal vollgetankt wird.
+      Der gleitende Wert (Summe Liter / Summe km ueber mind. fenster_km)
+      gleicht Teilbetankungen aus.
+    """
+    cols = ["date", "km_stand", "liter", "gefahrene_km", "verbrauch", "verbrauch_gleitend"]
+    d = df.sort_values(["date", "km_stand"], na_position="first").reset_index(drop=True)
+    has_preis = d["preis_pro_liter"].notna() & (d["preis_pro_liter"] > 0)
+    d["liter"] = np.where(has_preis, d["amount"] / d["preis_pro_liter"], np.nan)
+
+    rows, letzter_km, liter_acc, ok = [], None, 0.0, True
+    for _, r in d.iterrows():
+        if letzter_km is not None:
+            if pd.isna(r["liter"]):
+                ok = False
+            else:
+                liter_acc += r["liter"]
+        if pd.notna(r["km_stand"]):
+            if letzter_km is not None:
+                km = r["km_stand"] - letzter_km
+                if ok and km > 0:
+                    rows.append({"date": r["date"], "km_stand": r["km_stand"], "liter": liter_acc, "gefahrene_km": km})
+            letzter_km, liter_acc, ok = r["km_stand"], 0.0, True
+    out = pd.DataFrame(rows, columns=cols[:4])
+    if out.empty:
+        return pd.DataFrame(columns=cols)
+    out["verbrauch"] = out["liter"] / out["gefahrene_km"] * 100
+
+    cum_l = np.concatenate([[0.0], out["liter"].cumsum().to_numpy()])
+    cum_km = np.concatenate([[0.0], out["gefahrene_km"].cumsum().to_numpy()])
+    gleitend = []
+    for i in range(1, len(out) + 1):
+        # fruehester Start j, sodass die km von j..i mindestens fenster_km ergeben
+        j = np.searchsorted(cum_km, cum_km[i] - fenster_km, side="right") - 1
+        j = max(j, 0)
+        gleitend.append((cum_l[i] - cum_l[j]) / (cum_km[i] - cum_km[j]) * 100)
+    out["verbrauch_gleitend"] = gleitend
+    return out
+
+
 def km_conflict(df: pd.DataFrame, date: pd.Timestamp, km: float | None, exclude_id=None) -> str | None:
     """Prueft, ob ein Kilometerstand zur zeitlichen Reihenfolge passt.
 
