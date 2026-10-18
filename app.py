@@ -8,7 +8,16 @@ import plotly.graph_objects as go
 import streamlit as st
 from supabase import create_client
 
-from forecast import complete_weeks, forecast_trend, km_conflict, verbrauch_intervalle, weekly_amounts
+import importlib
+
+import forecast
+
+# Streamlit Cloud laedt nach einem git-Update nur app.py neu; bereits
+# importierte Hilfsmodule bleiben sonst in alter Version im Speicher
+# (-> ImportError bei neuen Funktionen). Reload kostet bei dieser Dateigroesse
+# praktisch nichts.
+importlib.reload(forecast)
+from forecast import complete_weeks, forecast_trend, km_conflict, verbrauch_intervalle, weekly_amounts  # noqa: E402
 
 # --- PAGE CONFIGURATION (muss der erste Streamlit-Aufruf sein) ---
 st.set_page_config(
