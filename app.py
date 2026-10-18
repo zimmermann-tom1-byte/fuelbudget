@@ -247,6 +247,25 @@ base_forecast = float(trend.iloc[-1]) if not trend.empty else 0.0
 final_weekly_forecast = base_forecast * (1 + buffer_pct / 100.0)
 final_monthly_projection = (final_weekly_forecast * 52) / 12
 
+# --- AKTUELLER MONAT: bisherige Zahlungen + Prognose fuer die Resttage ---
+MONATSNAMEN = [
+    "Januar", "Februar", "März", "April", "Mai", "Juni",
+    "Juli", "August", "September", "Oktober", "November", "Dezember"
+]
+
+monat_df = df[
+    (df["date"].dt.year == heute.year) & (df["date"].dt.month == heute.month)
+].sort_values("date").reset_index(drop=True)
+monatsname = f"{MONATSNAMEN[heute.month - 1]} {heute.year}"
+
+# Restprognose nur fuer die VERBLEIBENDEN Tage des Monats (heute eingeschlossen),
+# nicht "volle Monatshochrechnung minus bisher ausgegeben".
+tage_im_monat = calendar.monthrange(heute.year, heute.month)[1]
+resttage = tage_im_monat - heute.day + 1
+prognostizierter_rest = final_weekly_forecast / 7 * resttage
+ausgegeben_monat = monat_df["amount"].sum()
+erwartet_monat = ausgegeben_monat + prognostizierter_rest
+
 # --- DASHBOARD METRIKEN ---
 col1, col2, col3 = st.columns(3)
 puffer_text = f"{buffer_pct:+d}% Puffer" if buffer_pct != 0 else "Kein Puffer"
@@ -255,10 +274,35 @@ with col1:
     st.metric(label=f"Budget kommende KW ({modus_text})", value=f"{final_weekly_forecast:.2f} €", delta=puffer_text)
 
 with col2:
-    st.metric(label=f"Hochrechnung / Monat ({modus_text})", value=f"{final_monthly_projection:.2f} €", delta=puffer_text)
+    # Verbindet bisherige Zahlungen des Monats mit der Prognose fuer die Resttage.
+    st.metric(
+        label=f"Erwartet im {MONATSNAMEN[heute.month - 1]}",
+        value=f"{erwartet_monat:.2f} €",
+        delta=f"{ausgegeben_monat:.2f} € bisher + {prognostizierter_rest:.2f} € Prognose",
+        delta_color="off",
+        help=f"Ein typischer Monat nach aktueller Prognose ({modus_text}, {puffer_text}): "
+             f"{final_monthly_projection:.2f} €.",
+    )
 
 with col3:
     st.metric(label="Gesamtausgaben", value=f"{amounts.sum():.2f} €", delta=f"{n_samples} Tankungen")
+
+# Plausibilitaetscheck: Passt das bisherige Monatstempo zur Prognose? Erst ab
+# dem 10. Tag, vorher ist eine einzelne Tankung zu dominant.
+basis_monat = base_forecast * 52 / 12
+if heute.day >= 10 and basis_monat > 0:
+    tempo_monat = ausgegeben_monat / heute.day * tage_im_monat
+    if tempo_monat > basis_monat * 1.25:
+        st.warning(
+            f"Dein bisheriges Tempo im {MONATSNAMEN[heute.month - 1]} entspricht etwa "
+            f"**{tempo_monat:.0f} €/Monat** – deutlich mehr als die Prognose ohne Puffer "
+            f"({basis_monat:.0f} €). Hält das an, zieht die Prognose in den nächsten Wochen nach."
+        )
+    elif tempo_monat < basis_monat * 0.75 and heute.day >= 20:
+        st.info(
+            f"Dein bisheriges Tempo im {MONATSNAMEN[heute.month - 1]} entspricht etwa "
+            f"**{tempo_monat:.0f} €/Monat** – deutlich weniger als die Prognose ({basis_monat:.0f} €)."
+        )
 
 # --- TRANSPARENZ: SO ARBEITET DIE AUTOMATIK ---
 if auto:
@@ -485,27 +529,11 @@ else:
 # --- AUSGABEN AKTUELLER MONAT (EIN BALKEN, EIN SEGMENT PRO TANKVORGANG) ---
 st.markdown("### Ausgaben aktueller Monat")
 
-MONATSNAMEN = [
-    "Januar", "Februar", "März", "April", "Mai", "Juni",
-    "Juli", "August", "September", "Oktober", "November", "Dezember"
-]
 SEGMENT_FARBEN = [
     "#38bdf8", "#f59e0b", "#a78bfa", "#34d399", "#f472b6",
     "#facc15", "#60a5fa", "#fb923c", "#4ade80", "#c084fc"
 ]
 
-monat_df = df[
-    (df["date"].dt.year == heute.year) & (df["date"].dt.month == heute.month)
-].sort_values("date").reset_index(drop=True)
-monatsname = f"{MONATSNAMEN[heute.month - 1]} {heute.year}"
-
-# Restprognose nur fuer die VERBLEIBENDEN Tage des Monats (heute eingeschlossen),
-# nicht "volle Monatshochrechnung minus bisher ausgegeben".
-tage_im_monat = calendar.monthrange(heute.year, heute.month)[1]
-resttage = tage_im_monat - heute.day + 1
-prognostizierter_rest = final_weekly_forecast / 7 * resttage
-ausgegeben_monat = monat_df["amount"].sum()
-erwartet_monat = ausgegeben_monat + prognostizierter_rest
 
 monat_chart_col, monat_info_col = st.columns([1, 3])
 
