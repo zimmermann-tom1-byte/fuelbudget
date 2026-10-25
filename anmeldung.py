@@ -260,14 +260,24 @@ def login_seite() -> None:
                 reset_email = st.text_input("E-Mail", key="reset_email", autocomplete="username")
                 reset = st.form_submit_button("Link zum Zurücksetzen senden")
             if reset and reset_email.strip():
+                limit = False
                 try:
                     client().auth.reset_password_for_email(reset_email.strip())
-                except Exception:
-                    pass  # bewusst keine Auskunft, ob die Adresse existiert
-                st.success(
-                    "Falls ein Konto mit dieser Adresse existiert, ist eine E-Mail unterwegs. "
-                    "Bitte auch im Spam-Ordner nachsehen."
-                )
+                except Exception as exc:
+                    # Andere Fehler bewusst verschweigen (keine Auskunft, ob die
+                    # Adresse existiert). Das Mail-Limit gilt fuers ganze Projekt
+                    # und verraet daher nichts ueber einzelne Adressen.
+                    limit = "rate limit" in str(exc).lower() or "429" in str(exc)
+                if limit:
+                    st.warning(
+                        "Es wurden gerade zu viele E-Mails verschickt (Limit des kostenlosen "
+                        "Mail-Versands). Bitte in etwa einer Stunde erneut versuchen."
+                    )
+                else:
+                    st.success(
+                        "Falls ein Konto mit dieser Adresse existiert, ist eine E-Mail unterwegs. "
+                        "Bitte auch im Spam-Ordner nachsehen."
+                    )
 
         st.caption("Zugang nur auf Einladung.")
     st.stop()
