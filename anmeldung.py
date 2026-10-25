@@ -6,9 +6,12 @@
 - "Angemeldet bleiben": Der Refresh-Token liegt in einem Browser-Cookie. Beim
   naechsten Oeffnen meldet die App damit im Hintergrund wieder an. Klappt das
   nicht (z. B. Safari-Einschraenkungen), erscheint einfach die Login-Maske.
-- Einladungs- und Passwort-Links kommen als ?token_hash=...&type=... an
-  (E-Mail-Vorlagen in Supabase entsprechend angepasst), weil Streamlit den
-  Teil hinter einer # nicht lesen kann.
+- Einladungs- und Passwort-Links: Supabase leitet nach dem Klick auf
+  https://fuelbudget.streamlit.app/#access_token=...&refresh_token=... weiter.
+  Den Teil hinter der # sieht nur der Browser, nicht der Streamlit-Server.
+  link_weiterleitung() liest ihn deshalb per JavaScript aus und laedt die Seite
+  mit ?sb_at=...&sb_rt=... neu, was die App lesen kann. (Alternativ, mit
+  eigenem SMTP und angepassten Vorlagen: ?token_hash=...&type=...)
 """
 
 from __future__ import annotations
@@ -107,6 +110,44 @@ def _cookie_js(wert: str | None) -> None:
     )
 
 
+# --- Links aus E-Mails (Einladung / Passwort zuruecksetzen) -------------------
+
+_HASH_JS = """
+<script>
+(function () {
+  function lesen(w) { try { return [w, w.location.hash || ""]; } catch (e) { return null; } }
+  var ziel = lesen(window.top);
+  if (!ziel || ziel[1].length < 2) { ziel = lesen(window.parent); }
+  if (!ziel || ziel[1].length < 2) { return; }
+  var w = ziel[0], p = new URLSearchParams(ziel[1].substring(1)), q = new URLSearchParams();
+  if (p.get("access_token") && p.get("refresh_token")) {
+    q.set("sb_at", p.get("access_token"));
+    q.set("sb_rt", p.get("refresh_token"));
+    q.set("sb_type", p.get("type") || "");
+  } else if (p.get("error") || p.get("error_code")) {
+    q.set("sb_error", p.get("error_code") || p.get("error"));
+  } else { return; }
+  var url = w.location.origin + w.location.pathname + "?" + q.toString();
+  // Die Komponente selbst ist "sandboxed" und darf die Seite nicht neu laden.
+  // Deshalb fuehrt ein Skript-Element im Hauptfenster die Weiterleitung aus.
+  try {
+    var sc = w.document.createElement("script");
+    sc.textContent = "window.location.replace(" + JSON.stringify(url) + ");";
+    w.document.body.appendChild(sc);
+  } catch (e) {
+    try { w.location.replace(url); } catch (e2) {}
+  }
+})();
+</script>
+"""
+
+
+def link_weiterleitung() -> None:
+    """In JEDEM Lauf aufrufen (auch wenn schon jemand angemeldet ist), damit
+    ein Passwort-Link immer verarbeitet wird."""
+    components.html(_HASH_JS, height=0)
+
+
 # --- Einstieg ----------------------------------------------------------------
 
 def aktueller_nutzer() -> dict | None:
@@ -115,7 +156,22 @@ def aktueller_nutzer() -> dict | None:
 
     # 1) Link aus Einladungs- oder Passwort-Mail
     qp = st.query_params
-    if "token_hash" in qp and qp.get("type") in _LINK_TYPEN:
+    if "sb_at" in qp and "sb_rt" in qp:
+        access, refresh, typ = qp.get("sb_at"), qp.get("sb_rt"), qp.get("sb_type", "")
+        st.query_params.clear()
+        try:
+            res = client().auth.set_session(access, refresh)
+            _uebernehmen(res.session)
+            s.pop("abgemeldet", None)
+            if typ in ("invite", "recovery"):
+                s["passwort_setzen"] = typ
+            return s["auth"]
+        except Exception:
+            s["link_fehler"] = True
+    elif "sb_error" in qp:
+        st.query_params.clear()
+        s["link_fehler"] = True
+    elif "token_hash" in qp and qp.get("type") in _LINK_TYPEN:
         token_hash, typ = qp.get("token_hash"), qp.get("type")
         st.query_params.clear()
         try:

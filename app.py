@@ -45,6 +45,7 @@ st.markdown("""
 
 
 # --- ANMELDUNG ---
+anmeldung.link_weiterleitung()
 nutzer = anmeldung.aktueller_nutzer()
 if nutzer is None:
     anmeldung.login_seite()          # beendet den Lauf
