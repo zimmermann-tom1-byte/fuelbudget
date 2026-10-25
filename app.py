@@ -61,6 +61,7 @@ with st.sidebar:
     konto_col.caption(f"👤 {nutzer['email']}")
     if abmelden_col.button("Abmelden", width="stretch"):
         anmeldung.abmelden()
+    anmeldung.passwort_aendern_bereich()
 
 
 # --- DATEN LADEN ---

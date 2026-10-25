@@ -312,3 +312,30 @@ def passwort_setzen_seite() -> None:
                     st.rerun()
                 st.error(f"Passwort konnte nicht gespeichert werden: {fehler}")
     st.stop()
+
+
+def passwort_aendern_bereich() -> None:
+    """Passwort im angemeldeten Zustand aendern (ohne E-Mail). Gedacht fuer die
+    Seitenleiste, z. B. nachdem ein Nutzer mit Start-Passwort angelegt wurde."""
+    with st.expander("🔑 Passwort ändern"):
+        with st.form("passwort_aendern_form", clear_on_submit=True):
+            pw1 = st.text_input("Neues Passwort", type="password", autocomplete="new-password", key="pw_neu_1")
+            pw2 = st.text_input("Passwort wiederholen", type="password", autocomplete="new-password", key="pw_neu_2")
+            ok = st.form_submit_button("Speichern", width="stretch")
+        if ok:
+            if len(pw1) < MIN_PASSWORT:
+                st.error(f"Mindestens {MIN_PASSWORT} Zeichen.")
+            elif pw1 != pw2:
+                st.error("Die Passwörter stimmen nicht überein.")
+            else:
+                fehler = None
+                try:
+                    client().auth.update_user({"password": pw1})
+                except Exception as exc:
+                    fehler = exc
+                if fehler is None:
+                    st.success("Passwort geändert.")
+                elif "different from the old" in str(fehler).lower() or "same_password" in str(fehler).lower():
+                    st.error("Das neue Passwort muss sich vom alten unterscheiden.")
+                else:
+                    st.error(f"Passwort konnte nicht geändert werden: {fehler}")
