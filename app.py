@@ -1,4 +1,6 @@
 import calendar
+import importlib
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -6,10 +8,8 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from supabase import create_client
 
-import importlib
-
+import anmeldung
 import forecast
 
 # Streamlit Cloud laedt nach einem git-Update nur app.py neu; bereits
@@ -17,6 +17,7 @@ import forecast
 # (-> ImportError bei neuen Funktionen). Reload kostet bei dieser Dateigroesse
 # praktisch nichts.
 importlib.reload(forecast)
+importlib.reload(anmeldung)
 from forecast import (  # noqa: E402
     AUTO_HORIZONT, AUTO_MIN_TRAIN, auto_select, complete_weeks, forecast_trend,
     km_conflict, verbrauch_intervalle, weekly_amounts,
@@ -43,22 +44,42 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- SUPABASE VERBINDUNG ---
-# Client nur einmal pro Server-Prozess erzeugen statt bei jedem Rerun.
-@st.cache_resource
-def get_supabase():
-    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+# --- ANMELDUNG ---
+nutzer = anmeldung.aktueller_nutzer()
+if nutzer is None:
+    anmeldung.login_seite()          # beendet den Lauf
+if st.session_state.get("passwort_setzen"):
+    anmeldung.passwort_setzen_seite()  # beendet den Lauf
+anmeldung.cookie_aktualisieren()
+
+USER_ID = nutzer["user_id"]
+supabase = anmeldung.client()  # Client DIESER Sitzung, Abfragen laufen mit dem Login des Nutzers
+
+with st.sidebar:
+    konto_col, abmelden_col = st.columns([3, 2], vertical_alignment="center")
+    konto_col.caption(f"👤 {nutzer['email']}")
+    if abmelden_col.button("Abmelden", width="stretch"):
+        anmeldung.abmelden()
 
 
-supabase = get_supabase()
+# --- DATEN LADEN ---
+# Zwischenspeicher bewusst pro Browser-Sitzung (session_state) statt global
+# (st.cache_data): So koennen Daten nie zwischen Nutzern durchrutschen.
+# Streamlit fuehrt das Skript bei jeder Widget-Aenderung neu aus; ohne Cache
+# ginge jedes Mal eine Abfrage an Supabase raus.
+CACHE_SEKUNDEN = 600
 
 
-# Streamlit fuehrt das GESAMTE Skript bei jeder Widget-Aenderung neu aus (jeder
-# Slider-Zug, jede Modus-Auswahl). Ohne Cache ging dabei jedes Mal eine Abfrage
-# an Supabase raus - das war der Hauptgrund, warum sich die Prognose-Parameter
-# traege anfuehlten. Nach jedem Schreibzugriff wird der Cache geleert.
-@st.cache_data(ttl=600, show_spinner=False)
-def load_data():
+def _aus_cache(name, laden):
+    eintrag = st.session_state.get(name)
+    if eintrag and time.time() - eintrag[0] < CACHE_SEKUNDEN:
+        return eintrag[1]
+    wert = laden()
+    st.session_state[name] = (time.time(), wert)
+    return wert
+
+
+def _transaktionen_laden():
     response = supabase.table("transactions").select("*").execute()
     df = pd.DataFrame(response.data)
     # Leere Tabelle -> DataFrame ohne Spalten; Spalten trotzdem anlegen,
@@ -74,8 +95,7 @@ def load_data():
     return df.sort_values(["date", "km_stand"], ascending=False, na_position="last").reset_index(drop=True)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def load_oil_settings():
+def _oel_laden():
     try:
         response = supabase.table("oil_change_settings").select("*").limit(1).execute()
         return {"ok": True, "data": response.data[0] if response.data else {}}
@@ -83,11 +103,19 @@ def load_oil_settings():
         return {"ok": False, "error": str(exc)}
 
 
+def load_data():
+    return _aus_cache("_cache_transaktionen", _transaktionen_laden)
+
+
+def load_oil_settings():
+    return _aus_cache("_cache_oel", _oel_laden)
+
+
 def nach_schreibzugriff(meldung: str):
     """Cache leeren, Meldung fuer den naechsten Durchlauf merken, neu laden.
     (Ein st.success() direkt vor st.rerun() ist nie zu sehen.)"""
-    load_data.clear()
-    load_oil_settings.clear()
+    st.session_state.pop("_cache_transaktionen", None)
+    st.session_state.pop("_cache_oel", None)
     st.session_state["flash"] = meldung
     st.rerun()
 
@@ -207,6 +235,7 @@ if submitted:
         st.sidebar.error(km_fehler)
     elif new_amount > 0:
         supabase.table("transactions").insert({
+            "user_id": USER_ID,
             "date": str(new_date),
             "amount": float(new_amount),
             "km_stand": float(new_km) if new_km is not None else None,
@@ -584,8 +613,8 @@ oil_result = load_oil_settings()
 
 if not oil_result["ok"]:
     st.info(
-        "Die Ölwechsel-Einstellungen konnten nicht geladen werden. Entweder fehlt die Tabelle "
-        "`oil_change_settings` in Supabase, oder die Verbindung ist gestört."
+        "Die Ölwechsel-Einstellungen konnten nicht geladen werden. "
+        "Bitte die Seite neu laden; falls das nicht hilft, ist die Verbindung gestört."
     )
     st.caption(f"Fehler: {oil_result['error']}")
 elif not oil_result["data"]:
@@ -605,7 +634,7 @@ elif not oil_result["data"]:
             st.error("Es ist noch kein Kilometerstand erfasst. Bitte zuerst einen Tankvorgang mit Kilometerstand eintragen.")
         else:
             supabase.table("oil_change_settings").insert({
-                "id": 1,
+                "user_id": USER_ID,
                 "interval_km": float(setup_interval),
                 "last_oil_change_km": float(letzter_km_stand - setup_vor_km),
             }).execute()
@@ -686,7 +715,7 @@ else:
                 update_payload = {"interval_km": float(edit_interval)}
                 if edit_vor_km is not None:
                     update_payload["last_oil_change_km"] = float(letzter_km_stand - edit_vor_km)
-                supabase.table("oil_change_settings").update(update_payload).eq("id", 1).execute()
+                supabase.table("oil_change_settings").update(update_payload).eq("user_id", USER_ID).execute()
                 nach_schreibzugriff("Ölwechsel-Einstellungen aktualisiert.")
 
 # --- HISTORIE: PRO ZEILE EINZELN BEARBEITBAR ODER LÖSCHBAR ---
