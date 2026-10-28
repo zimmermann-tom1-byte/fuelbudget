@@ -61,7 +61,21 @@ def _uebernehmen(session) -> None:
         "email": session.user.email,
         "refresh_token": session.refresh_token,
         "expires_at": float(session.expires_at or time.time() + 3600),
+        # app_metadata kann nur der Admin (per SQL) setzen, nicht der Nutzer.
+        # "finanzen": true schaltet die Finanzseiten frei.
+        "app_metadata": dict(getattr(session.user, "app_metadata", None) or {}),
     }
+
+
+def sitzung_neu_uebernehmen() -> None:
+    """Nach einem 2FA-Code hat der Client eine neue Sitzung (aal2) mit neuem
+    Refresh-Token. Diese uebernehmen, damit Cookie und Token-Erneuerung stimmen."""
+    _uebernehmen(client().auth.get_session())
+
+
+def finanzen_freigeschaltet() -> bool:
+    auth = st.session_state.get("auth") or {}
+    return bool((auth.get("app_metadata") or {}).get("finanzen"))
 
 
 def _abmelden_lokal() -> None:
