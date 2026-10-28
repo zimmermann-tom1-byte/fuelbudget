@@ -70,7 +70,30 @@ def _uebernehmen(session) -> None:
 def sitzung_neu_uebernehmen() -> None:
     """Nach einem 2FA-Code hat der Client eine neue Sitzung (aal2) mit neuem
     Refresh-Token. Diese uebernehmen, damit Cookie und Token-Erneuerung stimmen."""
-    _uebernehmen(client().auth.get_session())
+    session = client().auth.get_session()
+    _uebernehmen(session)
+    _token_setzen(session.access_token)
+
+
+def token_fuer_abfragen_setzen() -> None:
+    """Aktuellen Sitzungs-Token fuer Datenbankabfragen erzwingen (siehe _token_setzen)."""
+    session = client().auth.get_session()
+    if session:
+        _token_setzen(session.access_token)
+
+
+def _token_setzen(token: str) -> None:
+    """Den Login-Token ausdruecklich fuer Datenbankabfragen setzen.
+
+    Veroeffentlichte Versionen von supabase-py setzen nach dem Ereignis
+    MFA_CHALLENGE_VERIFIED faelschlich den anon-Key statt des Nutzer-Tokens.
+    Abfragen liefen dann ohne Login und wuerden abgewiesen (401)."""
+    c = client()
+    try:
+        c.options.headers["Authorization"] = f"Bearer {token}"
+    except Exception:
+        pass
+    c.postgrest.auth(token)
 
 
 def finanzen_freigeschaltet() -> bool:

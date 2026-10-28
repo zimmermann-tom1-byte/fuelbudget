@@ -135,6 +135,7 @@ def sicherstellen() -> None:
         st.info("Die Finanzübersicht ist für dein Konto nicht freigeschaltet.")
         st.stop()
     if _stufe() == "aal2":
+        anmeldung.token_fuer_abfragen_setzen()
         return
     try:
         verifiziert, _ = _faktoren()

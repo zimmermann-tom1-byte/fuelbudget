@@ -90,10 +90,22 @@ class FakeMFA:
             qr_code="data:image/svg+xml;utf-8,<svg/>", secret="ABC", uri="otpauth://totp/x"))
 
 
+class FakePostgrest:
+    def __init__(self):
+        self.token = None
+
+    def auth(self, token):
+        self.token = token
+
+
 class FakeClient:
     def __init__(self, db, stufe="aal2"):
         self.db = db
-        self.auth = types.SimpleNamespace(mfa=FakeMFA(stufe))
+        self.auth = types.SimpleNamespace(
+            mfa=FakeMFA(stufe),
+            get_session=lambda: types.SimpleNamespace(access_token="nutzer-token"))
+        self.postgrest = FakePostgrest()
+        self.options = types.SimpleNamespace(headers={"Authorization": "Bearer anon-key"})
 
     def table(self, name):
         return FakeQuery(self.db, name)
@@ -317,3 +329,11 @@ def test_app_ohne_freischaltung_nur_fuelbudget(umgebung, monkeypatch):
 def test_fuelbudget_seite_laeuft(umgebung, monkeypatch):
     _tankungen(umgebung.db)
     assert _app_starten(umgebung, monkeypatch, ziel="fuelbudget.py") == "fertig"
+
+
+def test_finanzseite_setzt_nutzer_token(umgebung):
+    """Regression: supabase-py setzte nach dem 2FA-Code den anon-Key (401)."""
+    beispieldaten(umgebung.db)
+    assert ausfuehren("vermoegen.py") == "fertig"
+    assert umgebung.client.postgrest.token == "nutzer-token"
+    assert umgebung.client.options.headers["Authorization"] == "Bearer nutzer-token"
