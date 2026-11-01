@@ -1,4 +1,4 @@
-"""Stammdaten: Konten, Toepfe, Zinssaetze, Verbindlichkeiten und Startbestand."""
+"""Stammdaten: Posten, Startbestand, Zinssaetze und Verbindlichkeiten."""
 
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -16,11 +16,11 @@ heute = pd.Timestamp(datetime.now(TZ).date())
 eur = b.eur
 
 d = daten.alles()
-konten, toepfe = d["konten"], d["toepfe"]
-konto_name = dict(zip(konten["id"], konten["name"]))
-topf_name = {None: "– ohne Topf (frei) –", **dict(zip(toepfe["id"], toepfe["name"]))}
+posten, toepfe = d["konten"], d["toepfe"]
+posten_name = dict(zip(posten["id"], posten["name"]))
+topf_ziel = dict(zip(toepfe["id"], toepfe["zielbetrag"]))
 
-st.title("Konten & Töpfe 🗂️")
+st.title("Posten 🗂️")
 
 
 def _schreiben(aktion, meldung):
@@ -37,202 +37,196 @@ def _zahl_oder_none(x):
     return None if x is None or x == 0 else round(float(x), 2)
 
 
-def _auswahl_neu_oder(df, label, key):
-    """Selectbox: neuen Eintrag anlegen oder vorhandenen bearbeiten."""
-    opt = [None] + list(df["id"])
-    namen = dict(zip(df["id"], df["name"] + df["aktiv"].map({True: "", False: " (inaktiv)"})))
-    return st.selectbox(label, opt, key=key,
-                        format_func=lambda i: "➕ Neu anlegen" if i is None else namen.get(i, i))
+def _text(x):
+    return "" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x)
 
 
-tab_start, tab_toepfe, tab_konten, tab_zins, tab_verb = st.tabs(
-    ["🚀 Start", "🫙 Töpfe", "🏦 Konten", "📈 Zinssätze", "📉 Verbindlichkeiten"]
+tab_start, tab_posten, tab_zins, tab_verb = st.tabs(
+    ["🚀 Start", "📦 Posten", "📈 Zinssätze & Renditen", "📉 Verbindlichkeiten"]
 )
 
 # --- START ------------------------------------------------------------------------
 with tab_start:
     schritte = [
-        ("Töpfe anlegen", not toepfe.empty,
-         "Wofür ist dein Geld da? z. B. Autopuffer, Fixkosten-Rücklage, Geldbuße, Blitzer-Rücklage."),
-        ("Konten anlegen", not konten.empty,
-         "Wo liegt dein Geld? Je Konto Art, Ertragsart, Risiko und Standardtopf."),
+        ("Posten anlegen", not posten.empty,
+         "Je Bereich ein Posten: wo liegt das Geld (Anbieter, Produkt) und wie verfügbar ist es (Stufe)."),
         ("Zinssätze eintragen", not d["zinssaetze"].empty,
-         "Für Zinskonten den aktuellen Satz, für Dividenden die erwartete Ausschüttungsrendite, "
-         "fürs Depot deine angenommene Rendite."),
+         "Für Zinsposten den aktuellen Satz, für Dividenden die erwartete Ausschüttung. "
+         "Die Depot-Rendite kann die Seite **Depot-Rendite** selbst ermitteln."),
         ("Startbestand buchen", (d["buchungen"]["typ"] == "eroeffnung").any(),
-         "Je Konto den Stand am Stichtag eintragen, aufgeteilt auf die Töpfe."),
+         "Alle Stände am Stichtag in einer Tabelle eintragen (unten)."),
+        ("Fixkosten erfassen", not d["fixkosten"].empty,
+         "Auf der Seite **Fixkosten**: Name, Betrag, Intervall, nächste Fälligkeit."),
     ]
     st.markdown("**Einrichtung in vier Schritten**")
     for nr, (titel, fertig, text) in enumerate(schritte, 1):
         st.markdown(f"{'✅' if fertig else '⬜'} **{nr}. {titel}** – {text}")
 
     st.markdown("---")
-    st.markdown("### Startbestand je Konto")
-    aktive_konten = konten[konten["aktiv"]]
-    if aktive_konten.empty:
-        st.info("Lege zuerst Konten an.")
+    st.markdown("### Startbestand aller Posten")
+    aktive = posten[posten["aktiv"]]
+    if aktive.empty:
+        st.info("Lege zuerst Posten an.")
     else:
-        k_id = st.selectbox("Konto", list(aktive_konten["id"]), format_func=konto_name.get, key="start_konto")
         bu = d["buchungen"]
-        vorhanden = bu[(bu["konto_id"] == k_id) & (bu["typ"] == "eroeffnung")]
-        if not vorhanden.empty:
-            st.warning(
-                f"Für dieses Konto gibt es schon einen Startbestand über {eur(vorhanden['betrag'].sum())} "
-                f"(Stichtag {vorhanden['datum'].min().strftime('%d.%m.%Y')}). Speichern ersetzt ihn."
-            )
-        aktive_toepfe = toepfe[toepfe["aktiv"]]
-        vorbelegung = (vorhanden.assign(t=vorhanden["topf_id"].where(vorhanden["topf_id"].notna(), "frei"))
-                       .groupby("t")["betrag"].sum())
+        eroeffnung = bu[bu["typ"] == "eroeffnung"]
+        vorbelegung = eroeffnung.groupby("konto_id")["betrag"].sum()
+        stichtag_default = eroeffnung["datum"].min().date() if not eroeffnung.empty else date(2026, 11, 1)
         editor_df = pd.DataFrame({
-            "topf_id": ["frei"] + list(aktive_toepfe["id"]),
-            "Topf": ["– ohne Topf (frei) –"] + list(aktive_toepfe["name"]),
+            "id": aktive["id"],
+            "Posten": aktive["name"],
+            "Stufe": aktive["stufe"].map(b.STUFEN),
+            "Betrag (€)": aktive["id"].map(vorbelegung).fillna(0.0).astype(float),
         })
-        editor_df["Betrag (€)"] = editor_df["topf_id"].map(vorbelegung).fillna(0.0).astype(float)
-        stichtag_default = vorhanden["datum"].min().date() if not vorhanden.empty else date(2026, 11, 1)
-        with st.form(f"startbestand_form_{k_id}"):
+        st.caption("Nur geänderte Zeilen werden neu gebucht. Ein vorhandener Startbestand wird dabei ersetzt.")
+        with st.form("startbestand_form"):
             stichtag = st.date_input("Stichtag", value=stichtag_default, format="DD.MM.YYYY")
             bearbeitet = st.data_editor(
-                editor_df, hide_index=True, width="stretch", disabled=["Topf"],
-                column_order=["Topf", "Betrag (€)"],
+                editor_df, hide_index=True, width="stretch", disabled=["Posten", "Stufe"],
+                column_order=["Posten", "Stufe", "Betrag (€)"],
                 column_config={"Betrag (€)": st.column_config.NumberColumn(format="%.2f", step=0.01)},
-                key=f"start_editor_{k_id}",
+                key="start_editor",
             )
             ok = st.form_submit_button("Startbestand speichern", type="primary", width="stretch")
         summe = float(pd.to_numeric(bearbeitet["Betrag (€)"], errors="coerce").fillna(0).sum())
-        st.caption(f"Summe: {eur(summe)} – sollte dem Kontostand am Stichtag entsprechen.")
+        st.caption(f"Summe: {eur(summe)}")
         if ok:
-            zeilen = []
+            alt_datum = eroeffnung.groupby("konto_id")["datum"].min()
+            geaendert = []
             for _, r in bearbeitet.iterrows():
-                betrag = round(float(r["Betrag (€)"] or 0), 2)
-                if abs(betrag) >= 0.005:
-                    zeilen.append({"datum": str(stichtag), "konto_id": k_id,
-                                   "topf_id": None if r["topf_id"] == "frei" else r["topf_id"],
-                                   "betrag": betrag, "typ": "eroeffnung", "beschreibung": "Startbestand"})
+                neu = round(float(r["Betrag (€)"] or 0), 2)
+                alt = round(float(vorbelegung.get(r["id"], 0.0)), 2)
+                datum_alt = alt_datum.get(r["id"])
+                if neu != alt or (datum_alt is not None and datum_alt.date() != stichtag and neu):
+                    geaendert.append((r["id"], neu))
+            if not geaendert:
+                st.info("Keine Änderung.")
+            else:
+                topf_von = posten.set_index("id")["standard_topf_id"]
 
-            def _start():
-                if not vorhanden.empty:
-                    daten.loeschen("buchungen", list(vorhanden["id"]))
-                if zeilen:
-                    daten.einfuegen("buchungen", zeilen)
-            _schreiben(_start, f"Startbestand für {konto_name[k_id]} gespeichert ({eur(summe)}).")
+                def _start():
+                    ids = [i for i, _ in geaendert]
+                    alte = eroeffnung[eroeffnung["konto_id"].isin(ids)]
+                    if not alte.empty:
+                        daten.loeschen("buchungen", list(alte["id"]))
+                    zeilen = [{"datum": str(stichtag), "konto_id": kid,
+                               "topf_id": topf_von.get(kid) if pd.notna(topf_von.get(kid)) else None,
+                               "betrag": betrag, "typ": "eroeffnung", "beschreibung": "Startbestand"}
+                              for kid, betrag in geaendert if abs(betrag) >= 0.005]
+                    if zeilen:
+                        daten.einfuegen("buchungen", zeilen)
+                _schreiben(_start, f"Startbestand für {len(geaendert)} Posten gespeichert.")
 
-# --- TOEPFE ------------------------------------------------------------------------
-with tab_toepfe:
+# --- POSTEN ------------------------------------------------------------------------
+with tab_posten:
     st.caption(
-        "Ein Topf ist ein Zweck, kein Ort: Der Topf „Autopuffer“ kann auf mehreren Konten liegen. "
-        "Art „frei“ zählt zum frei verfügbaren Geld, alle anderen gelten als verplant."
+        "Ein Posten ist ein Bereich deines Geldes, z. B. „Autorücklagen bei BBVA“. Die **Stufe** sagt, "
+        "wie verfügbar das Geld ist. Posten, die im selben Produkt liegen (z. B. zwei Rücklagen im "
+        "selben Geldmarktfonds), bekommen dieselbe **Abgleichsgruppe**: Beim Kontoabgleich trägst du "
+        "dann nur den Gesamtstand ein."
     )
-    t_id = _auswahl_neu_oder(toepfe, "Topf", "topf_auswahl")
-    alt = toepfe.set_index("id").loc[t_id] if t_id else None
-    arten = list(b.TOPF_ARTEN)
-    with st.form(f"topf_form_{t_id}"):
-        name = st.text_input("Name", value="" if alt is None else alt["name"], max_chars=60)
-        art = st.selectbox("Art", arten, format_func=b.TOPF_ARTEN.get,
-                           index=arten.index(alt["art"]) if alt is not None else 1)
-        c1, c2 = st.columns(2)
-        ziel = c1.number_input("Zielbetrag (€, optional)", min_value=0.0, step=10.0, format="%.2f",
-                               value=float(alt["zielbetrag"]) if alt is not None and pd.notna(alt["zielbetrag"]) else 0.0)
-        rate = c2.number_input("Monatliche Sparrate (€, optional)", min_value=0.0, step=5.0, format="%.2f",
-                               value=float(alt["sparrate_monat"]) if alt is not None and pd.notna(alt["sparrate_monat"]) else 0.0,
-                               help="Für Rücklagen, die monatlich heruntergerechnet werden (z. B. Versicherung alle 3 Monate).")
-        notiz = st.text_input("Notiz", value="" if alt is None or pd.isna(alt["notiz"]) else alt["notiz"])
-        aktiv = st.checkbox("Aktiv", value=True if alt is None else bool(alt["aktiv"]))
-        ok = st.form_submit_button("Speichern", type="primary", width="stretch")
-    if ok:
-        werte = {"name": name.strip(), "art": art, "zielbetrag": _zahl_oder_none(ziel),
-                 "sparrate_monat": _zahl_oder_none(rate), "notiz": notiz.strip() or None, "aktiv": aktiv}
-        if not werte["name"]:
-            st.error("Bitte einen Namen eingeben.")
-        elif t_id is None:
-            werte["sortierung"] = len(toepfe)
-            _schreiben(lambda: daten.einfuegen("toepfe", werte), f"Topf „{werte['name']}“ angelegt.")
-        else:
-            _schreiben(lambda: daten.aendern("toepfe", t_id, werte), f"Topf „{werte['name']}“ gespeichert.")
-    if t_id:
-        with st.popover("🗑️ Topf löschen"):
-            st.write("Buchungen in diesem Topf werden dann als „ohne Topf“ geführt. Meist ist „Aktiv“ "
-                     "abwählen die bessere Wahl.")
-            if st.button("Endgültig löschen", key="topf_loeschen"):
-                _schreiben(lambda: daten.loeschen("toepfe", [t_id]), "Topf gelöscht.")
+    opt = [None] + list(posten["id"])
+    namen = dict(zip(posten["id"], posten["name"] + posten["aktiv"].map({True: "", False: " (inaktiv)"})))
+    p_id = st.selectbox("Posten", opt, key="posten_auswahl",
+                        format_func=lambda i: "➕ Neu anlegen" if i is None else namen.get(i, i))
+    alt = posten.set_index("id").loc[p_id] if p_id else None
+    alt_topf = alt["standard_topf_id"] if alt is not None and pd.notna(alt["standard_topf_id"]) else None
+    k_arten, e_arten, stufen = list(b.KONTO_ARTEN), list(b.ERTRAGSARTEN), list(b.STUFEN)
+    gruppen = sorted(g for g in posten["abgleich_gruppe"].dropna().unique())
+    anbieter = sorted(a for a in posten["institut"].dropna().unique())
 
-# --- KONTEN ------------------------------------------------------------------------
-with tab_konten:
-    st.caption("Ein Konto ist ein Ort, an dem Geld liegt: Bankkonto, Depot, Geldmarktfonds, Bargeld …")
-    k_id = _auswahl_neu_oder(konten, "Konto", "konto_auswahl")
-    alt = konten.set_index("id").loc[k_id] if k_id else None
-    k_arten, e_arten = list(b.KONTO_ARTEN), list(b.ERTRAGSARTEN)
-    topf_opt = [None] + list(toepfe.loc[toepfe["aktiv"], "id"])
-    if alt is not None and pd.notna(alt["standard_topf_id"]) and alt["standard_topf_id"] not in topf_opt:
-        topf_opt.append(alt["standard_topf_id"])
-    with st.form(f"konto_form_{k_id}"):
+    with st.form(f"posten_form_{p_id}"):
         c1, c2 = st.columns(2)
         name = c1.text_input("Name", value="" if alt is None else alt["name"], max_chars=60,
-                             placeholder="z. B. TR Depot, T212 Geldmarktfonds")
-        institut = c2.text_input("Anbieter", value="" if alt is None or pd.isna(alt["institut"]) else alt["institut"],
-                                 placeholder="z. B. Trade Republic")
+                             placeholder="z. B. Autorücklagen")
+        institut = c2.text_input("Anbieter", value="" if alt is None else _text(alt["institut"]),
+                                 placeholder="z. B. Trading 212",
+                                 help=("Bisher verwendet: " + ", ".join(anbieter)) if anbieter else None)
+        stufe = st.selectbox("Stufe", stufen, format_func=lambda s: f"{b.STUFEN[s]} – {b.STUFE_ERKLAERUNG[s]}",
+                             index=stufen.index(alt["stufe"]) if alt is not None else 0)
         c3, c4 = st.columns(2)
-        art = c3.selectbox("Art", k_arten, format_func=b.KONTO_ARTEN.get,
+        art = c3.selectbox("Produkt", k_arten, format_func=b.KONTO_ARTEN.get,
                            index=k_arten.index(alt["art"]) if alt is not None else 1)
         ertragsart = c4.selectbox("Ertragsart", e_arten, format_func=b.ERTRAGSARTEN.get,
                                   index=e_arten.index(alt["ertragsart"]) if alt is not None else 0,
-                                  help="Zinsen werden täglich geschätzt. Ausschüttungen ebenso (als Erwartung). "
-                                       "Kursentwicklung wird nur als Annahme angezeigt.")
+                                  help="Zinsen und Ausschüttungen werden täglich geschätzt. "
+                                       "Kursentwicklung kommt aus der Seite Depot-Rendite.")
+        c5, c6 = st.columns(2)
+        ziel_alt = topf_ziel.get(alt_topf) if alt_topf else None
+        ziel = c5.number_input("Zielbetrag (€, optional)", min_value=0.0, step=50.0, format="%.2f",
+                               value=float(ziel_alt) if ziel_alt is not None and pd.notna(ziel_alt) else 0.0)
+        gruppe = c6.text_input("Abgleichsgruppe (optional)",
+                               value="" if alt is None else _text(alt["abgleich_gruppe"]),
+                               placeholder="z. B. T212 Geldmarktfonds Rücklagen",
+                               help=("Vorhandene Gruppen: " + ", ".join(gruppen)) if gruppen
+                               else "Gleicher Text = gleiche Gruppe.")
         risiko = st.select_slider("Risiko", options=list(b.RISIKO_STUFEN), format_func=b.RISIKO_STUFEN.get,
                                   value=int(alt["risiko"]) if alt is not None else 1)
-        st_topf = st.selectbox(
-            "Standardtopf", topf_opt, format_func=lambda t: topf_name.get(t, "?"),
-            index=topf_opt.index(alt["standard_topf_id"]) if alt is not None and alt["standard_topf_id"] in topf_opt else 0,
-            help="Hierhin fließen Zinsen und Abgleichsdifferenzen. Wird bei Buchungen vorausgewählt.",
-        )
-        notiz = st.text_input("Notiz", value="" if alt is None or pd.isna(alt["notiz"]) else alt["notiz"])
+        notiz = st.text_input("Notiz", value="" if alt is None else _text(alt["notiz"]))
         aktiv = st.checkbox("Aktiv", value=True if alt is None else bool(alt["aktiv"]))
         ok = st.form_submit_button("Speichern", type="primary", width="stretch")
     if ok:
         werte = {"name": name.strip(), "institut": institut.strip() or None, "art": art,
-                 "ertragsart": ertragsart, "risiko": int(risiko), "standard_topf_id": st_topf,
-                 "notiz": notiz.strip() or None, "aktiv": aktiv}
+                 "ertragsart": ertragsart, "risiko": int(risiko), "stufe": stufe,
+                 "abgleich_gruppe": gruppe.strip() or None, "notiz": notiz.strip() or None, "aktiv": aktiv}
         if not werte["name"]:
             st.error("Bitte einen Namen eingeben.")
-        elif k_id is None:
-            werte["sortierung"] = len(konten)
-            _schreiben(lambda: daten.einfuegen("konten", werte),
-                       f"Konto „{werte['name']}“ angelegt. Als Nächstes: Zinssatz und Startbestand.")
+        elif p_id is None:
+            werte["sortierung"] = len(posten)
+            _schreiben(lambda: daten.posten_anlegen(werte, _zahl_oder_none(ziel)),
+                       f"Posten „{werte['name']}“ angelegt. Als Nächstes: Zinssatz und Startbestand.")
         else:
-            _schreiben(lambda: daten.aendern("konten", k_id, werte), f"Konto „{werte['name']}“ gespeichert.")
-    if k_id:
-        with st.popover("🗑️ Konto löschen"):
-            st.write("Geht nur, solange keine Buchungen auf dem Konto liegen. Sonst „Aktiv“ abwählen.")
-            if st.button("Endgültig löschen", key="konto_loeschen"):
-                _schreiben(lambda: daten.loeschen("konten", [k_id]), "Konto gelöscht.")
+            _schreiben(lambda: daten.posten_aendern(p_id, alt_topf, werte, _zahl_oder_none(ziel)),
+                       f"Posten „{werte['name']}“ gespeichert.")
+    if p_id:
+        with st.popover("🗑️ Posten löschen"):
+            st.write("Geht nur, solange keine Buchungen auf dem Posten liegen. Sonst „Aktiv“ abwählen.")
+            if st.button("Endgültig löschen", key="posten_loeschen"):
+                _schreiben(lambda: daten.posten_loeschen(p_id, alt_topf), "Posten gelöscht.")
+
+    if not posten.empty:
+        st.markdown("---")
+        uebersicht = posten.copy()
+        uebersicht["_o"] = uebersicht["stufe"].map({s: i for i, s in enumerate(b.STUFEN)})
+        uebersicht = uebersicht.sort_values(["_o", "name"])
+        st.dataframe(pd.DataFrame({
+            "Posten": uebersicht["name"],
+            "Stufe": uebersicht["stufe"].map(b.STUFEN),
+            "Anbieter": uebersicht["institut"].fillna(""),
+            "Produkt": uebersicht["art"].map(b.KONTO_ARTEN),
+            "Abgleichsgruppe": uebersicht["abgleich_gruppe"].fillna(""),
+            "Aktiv": uebersicht["aktiv"],
+        }), hide_index=True, width="stretch")
 
 # --- ZINSSAETZE --------------------------------------------------------------------
 with tab_zins:
     st.caption(
         "Sätze ändern sich, deshalb mit Gültigkeitsdatum: Ein neuer Satz gilt ab seinem Datum, "
-        "die Vergangenheit bleibt richtig berechnet. Werte in % pro Jahr, vor Steuern."
+        "die Vergangenheit bleibt richtig berechnet. Werte in % pro Jahr, vor Steuern. "
+        "Für Depots trägt die Seite Depot-Rendite den gemessenen Wert automatisch ein."
     )
-    ertrag_konten = konten[konten["ertragsart"] != "keine"]
-    if ertrag_konten.empty:
-        st.info("Kein Konto mit Ertragsart Zinsen, Ausschüttungen oder Kursentwicklung vorhanden.")
+    ertrag_posten = posten[posten["ertragsart"] != "keine"]
+    if ertrag_posten.empty:
+        st.info("Kein Posten mit Zinsen, Ausschüttungen oder Kursentwicklung vorhanden.")
     else:
         with st.form("zins_form", clear_on_submit=True):
             c1, c2, c3 = st.columns([2, 1, 1])
-            z_konto = c1.selectbox("Konto", list(ertrag_konten["id"]), format_func=konto_name.get)
+            z_posten = c1.selectbox("Posten", list(ertrag_posten["id"]), format_func=posten_name.get)
             z_ab = c2.date_input("Gültig ab", value=heute.date(), format="DD.MM.YYYY")
             z_satz = c3.number_input("Satz % p. a.", step=0.05, format="%.2f", value=0.0)
             z_notiz = st.text_input("Notiz (optional)", placeholder="z. B. Zinssenkung EZB")
             ok = st.form_submit_button("Satz speichern", type="primary", width="stretch")
         if ok:
             _schreiben(lambda: daten.einfuegen("zinssaetze", {
-                "konto_id": z_konto, "gueltig_ab": str(z_ab), "satz_pa": round(z_satz, 4),
+                "konto_id": z_posten, "gueltig_ab": str(z_ab), "satz_pa": round(z_satz, 4),
                 "notiz": z_notiz.strip() or None}),
-                f"{z_satz:.2f} % für {konto_name[z_konto]} ab {z_ab:%d.%m.%Y} gespeichert.")
+                f"{z_satz:.2f} % für {posten_name[z_posten]} ab {z_ab:%d.%m.%Y} gespeichert.")
 
         z = d["zinssaetze"]
         if not z.empty:
             z = z.sort_values(["konto_id", "gueltig_ab"], ascending=[True, False]).reset_index(drop=True)
             anzeige = pd.DataFrame({
-                "Konto": z["konto_id"].map(konto_name),
+                "Posten": z["konto_id"].map(posten_name),
                 "Gültig ab": z["gueltig_ab"].dt.strftime("%d.%m.%Y"),
                 "Satz % p. a.": z["satz_pa"],
                 "Notiz": z["notiz"].fillna(""),
@@ -247,14 +241,16 @@ with tab_zins:
 # --- VERBINDLICHKEITEN -------------------------------------------------------------
 with tab_verb:
     st.caption(
-        "Schulden oder fest zugesagte Zahlungen (z. B. Geldbuße in Raten). Sie werden vom "
-        "Nettovermögen abgezogen. Tilgungen buchst du als Ausgabe mit Verweis auf die Verbindlichkeit."
+        "Echte Schulden (z. B. Geldbuße in Raten). Nur sie werden vom Nettovermögen abgezogen. "
+        "Regelmäßige Kosten gehören auf die Seite **Fixkosten**. Tilgungen buchst du als Ausgabe "
+        "mit Verweis auf die Verbindlichkeit."
     )
     vb = d["verbindlichkeiten"]
-    v_id = _auswahl_neu_oder(vb.assign(aktiv=~vb["erledigt"]) if not vb.empty else vb.assign(aktiv=True),
-                             "Verbindlichkeit", "verb_auswahl")
+    v_opt = [None] + list(vb["id"])
+    v_namen = dict(zip(vb["id"], vb["name"] + vb["erledigt"].map({True: " (erledigt)", False: ""})))
+    v_id = st.selectbox("Verbindlichkeit", v_opt, key="verb_auswahl",
+                        format_func=lambda i: "➕ Neu anlegen" if i is None else v_namen.get(i, i))
     alt = vb.set_index("id").loc[v_id] if v_id else None
-    topf_opt = [None] + list(toepfe.loc[toepfe["aktiv"], "id"])
     with st.form(f"verb_form_{v_id}"):
         name = st.text_input("Name", value="" if alt is None else alt["name"], max_chars=60)
         c1, c2 = st.columns(2)
@@ -262,23 +258,23 @@ with tab_verb:
                                  value=float(alt["betrag_gesamt"]) if alt is not None else 0.0)
         rate = c2.number_input("Monatsrate (€, optional)", min_value=0.0, step=10.0, format="%.2f",
                                value=float(alt["rate_monat"]) if alt is not None and pd.notna(alt["rate_monat"]) else 0.0)
-        v_topf = st.selectbox(
-            "Zugehöriger Topf (optional)", topf_opt, format_func=lambda t: topf_name.get(t, "?"),
-            index=topf_opt.index(alt["topf_id"]) if alt is not None and alt["topf_id"] in topf_opt else 0,
-            help="Der Topf, in dem das Geld dafür bereitliegt.",
-        )
-        notiz = st.text_input("Notiz", value="" if alt is None or pd.isna(alt["notiz"]) else alt["notiz"])
+        notiz = st.text_input("Notiz", value="" if alt is None else _text(alt["notiz"]))
         erledigt = st.checkbox("Erledigt", value=False if alt is None else bool(alt["erledigt"]))
         ok = st.form_submit_button("Speichern", type="primary", width="stretch")
     if ok:
         werte = {"name": name.strip(), "betrag_gesamt": round(gesamt, 2), "rate_monat": _zahl_oder_none(rate),
-                 "topf_id": v_topf, "notiz": notiz.strip() or None, "erledigt": erledigt}
+                 "notiz": notiz.strip() or None, "erledigt": erledigt}
         if not werte["name"] or gesamt <= 0:
             st.error("Bitte Name und einen Gesamtbetrag größer 0 eingeben.")
         elif v_id is None:
             _schreiben(lambda: daten.einfuegen("verbindlichkeiten", werte), "Verbindlichkeit angelegt.")
         else:
             _schreiben(lambda: daten.aendern("verbindlichkeiten", v_id, werte), "Verbindlichkeit gespeichert.")
+    if v_id:
+        with st.popover("🗑️ Verbindlichkeit löschen"):
+            st.write("Tilgungsbuchungen bleiben erhalten, verlieren aber den Verweis.")
+            if st.button("Endgültig löschen", key="verb_loeschen"):
+                _schreiben(lambda: daten.loeschen("verbindlichkeiten", [v_id]), "Verbindlichkeit gelöscht.")
     offen = b.verbindlichkeiten_offen(vb, d["buchungen"])
     if not offen.empty:
         st.dataframe(pd.DataFrame({

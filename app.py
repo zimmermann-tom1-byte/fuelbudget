@@ -4,7 +4,9 @@ Die eigentlichen Seiten liegen in seiten/:
 - fuelbudget.py      Spritkosten, Verbrauch, Oelwechsel (fuer alle Nutzer)
 - vermoegen.py       Finanzuebersicht (nur fuer freigeschaltete Nutzer, mit 2FA)
 - buchungen.py       Buchungen, Umbuchungen, Kontoabgleich
-- verwaltung.py      Konten, Toepfe, Zinssaetze, Verbindlichkeiten, Startbestand
+- fixkosten.py       Regelmaessige Fixkosten, Soll/Ist, Faelligkeiten
+- depot.py           Woechentliche Depot-Performance -> erwartete Rendite
+- verwaltung.py      Posten, Startbestand, Zinssaetze, Verbindlichkeiten
 """
 
 import importlib
@@ -61,7 +63,9 @@ if anmeldung.finanzen_freigeschaltet():
         "Finanzen": [
             st.Page("seiten/vermoegen.py", title="Vermögen", icon="💶", url_path="vermoegen", default=True),
             st.Page("seiten/buchungen.py", title="Buchungen", icon="🧾", url_path="buchungen"),
-            st.Page("seiten/verwaltung.py", title="Konten & Töpfe", icon="🗂️", url_path="verwaltung"),
+            st.Page("seiten/fixkosten.py", title="Fixkosten", icon="📆", url_path="fixkosten"),
+            st.Page("seiten/depot.py", title="Depot-Rendite", icon="📈", url_path="depot"),
+            st.Page("seiten/verwaltung.py", title="Posten", icon="🗂️", url_path="verwaltung"),
         ],
         "Auto": [fuelbudget],
     }

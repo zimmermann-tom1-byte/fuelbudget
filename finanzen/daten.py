@@ -25,16 +25,21 @@ TABELLEN = {
     "zinssaetze": "fin_zinssaetze",
     "verbindlichkeiten": "fin_verbindlichkeiten",
     "buchungen": "fin_buchungen",
+    "fixkosten": "fin_fixkosten",
+    "depot_wochen": "fin_depot_wochen",
 }
 
 _SPALTEN = {
     "konten": ["id", "name", "institut", "art", "ertragsart", "risiko", "standard_topf_id",
-               "sortierung", "aktiv", "notiz"],
+               "sortierung", "aktiv", "notiz", "stufe", "abgleich_gruppe"],
     "toepfe": ["id", "name", "art", "zielbetrag", "sparrate_monat", "sortierung", "aktiv", "notiz"],
     "zinssaetze": ["id", "konto_id", "gueltig_ab", "satz_pa", "notiz"],
     "verbindlichkeiten": ["id", "name", "betrag_gesamt", "rate_monat", "topf_id", "erledigt", "notiz"],
     "buchungen": ["id", "datum", "konto_id", "topf_id", "betrag", "typ", "kategorie",
                   "beschreibung", "gruppe", "verbindlichkeit_id", "erstellt_am"],
+    "fixkosten": ["id", "name", "betrag", "intervall_monate", "naechste_faelligkeit", "konto_id",
+                  "kategorie", "aktiv", "notiz"],
+    "depot_wochen": ["id", "konto_id", "datum", "performance_pct", "depotwert", "notiz"],
 }
 
 
@@ -71,6 +76,7 @@ def laden(name: str) -> pd.DataFrame:
         df = df.sort_values(["sortierung", "name"]).reset_index(drop=True)
     if name == "konten":
         df["risiko"] = pd.to_numeric(df["risiko"], errors="coerce").fillna(1).astype(int)
+        df["stufe"] = df["stufe"].fillna("frei")
     if name == "toepfe":
         for col in ("zielbetrag", "sparrate_monat"):
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -78,6 +84,13 @@ def laden(name: str) -> pd.DataFrame:
         df["erledigt"] = df["erledigt"].fillna(False).astype(bool)
     if name == "zinssaetze":
         df = b.zinssaetze_normalisieren(df)
+    if name == "fixkosten":
+        df = b.fixkosten_normalisieren(df)
+    if name == "depot_wochen":
+        df["datum"] = pd.to_datetime(df["datum"]).dt.normalize()
+        df["performance_pct"] = pd.to_numeric(df["performance_pct"], errors="coerce")
+        df["depotwert"] = pd.to_numeric(df["depotwert"], errors="coerce")
+        df = df.sort_values("datum").reset_index(drop=True)
     if name == "buchungen":
         df = b.buchungen_normalisieren(df).sort_values(["datum"], ascending=False).reset_index(drop=True)
     st.session_state[key] = (time.time(), df)
@@ -99,9 +112,52 @@ def _mit_uid(zeilen: list[dict] | dict) -> list[dict]:
     return [{**z, "user_id": _uid()} for z in zeilen]
 
 
-def einfuegen(name: str, zeilen: list[dict] | dict) -> None:
-    anmeldung.client().table(TABELLEN[name]).insert(_mit_uid(zeilen)).execute()
+def einfuegen(name: str, zeilen: list[dict] | dict) -> list[dict]:
+    """Fuegt ein und gibt die gespeicherten Zeilen (mit id) zurueck."""
+    res = anmeldung.client().table(TABELLEN[name]).insert(_mit_uid(zeilen)).execute()
     cache_leeren()
+    return res.data or []
+
+
+def einfuegen_oder_ersetzen(name: str, zeile: dict, konflikt: str) -> None:
+    """Upsert, z. B. Zinssatz je Posten und Datum (konflikt="konto_id,gueltig_ab")."""
+    anmeldung.client().table(TABELLEN[name]).upsert(_mit_uid(zeile), on_conflict=konflikt).execute()
+    cache_leeren()
+
+
+# --- Posten = Konto + eigener Topf -----------------------------------------------------
+# Die App zeigt nur Posten. Damit die Daten mit dem frueheren Konto-/Topf-Modell
+# kompatibel bleiben, bekommt jeder Posten im Hintergrund einen gleichnamigen
+# Topf (Standardtopf), auf den alle seine Buchungen laufen.
+
+def posten_anlegen(werte: dict, ziel: float | None) -> str:
+    topf = einfuegen("toepfe", {
+        "name": werte["name"], "art": b.STUFE_TOPF_ART[werte["stufe"]], "zielbetrag": ziel,
+        "sortierung": werte.get("sortierung", 0), "aktiv": werte.get("aktiv", True),
+    })[0]
+    konto = einfuegen("konten", {**werte, "standard_topf_id": topf["id"]})[0]
+    return konto["id"]
+
+
+def posten_aendern(konto_id: str, topf_id: str | None, werte: dict, ziel: float | None) -> None:
+    if topf_id:
+        aendern("toepfe", topf_id, {"name": werte["name"], "zielbetrag": ziel,
+                                    "art": b.STUFE_TOPF_ART[werte["stufe"]],
+                                    "aktiv": werte.get("aktiv", True)})
+        aendern("konten", konto_id, werte)
+    else:  # Posten ohne Topf (z. B. aus dem frueheren Modell): Topf nachruesten
+        topf = einfuegen("toepfe", {"name": werte["name"], "art": b.STUFE_TOPF_ART[werte["stufe"]],
+                                    "zielbetrag": ziel, "aktiv": werte.get("aktiv", True)})[0]
+        aendern("konten", konto_id, {**werte, "standard_topf_id": topf["id"]})
+
+
+def posten_loeschen(konto_id: str, topf_id: str | None) -> None:
+    loeschen("konten", [konto_id])  # scheitert bewusst, solange Buchungen existieren
+    if topf_id:
+        try:
+            loeschen("toepfe", [topf_id])
+        except Exception:
+            pass  # Topf wird noch von alten Buchungen genutzt -> liegen lassen
 
 
 def aendern(name: str, zeilen_id: str, werte: dict) -> None:
@@ -135,7 +191,7 @@ def fehlertext(exc: Exception) -> str:
         return ("Das geht nicht, weil noch Buchungen darauf verweisen. "
                 "Deaktiviere den Eintrag stattdessen.")
     if "23505" in t or "duplicate" in t.lower():
-        return "Diesen Eintrag gibt es schon (z. B. zweiter Zinssatz am selben Tag)."
+        return "Diesen Eintrag gibt es schon (z. B. zweiter Eintrag am selben Tag)."
     if "42501" in t or "row-level security" in t.lower():
         return "Keine Berechtigung. Bitte mit Bestätigungscode erneut anmelden."
     if "23514" in t or "check constraint" in t.lower():

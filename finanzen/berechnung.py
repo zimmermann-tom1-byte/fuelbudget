@@ -2,10 +2,14 @@
 damit sie sich mit Unit-Tests pruefen laesst.
 
 Grundidee (Hauptbuch):
-- Jede Geldbewegung ist eine Buchung mit Konto (wo liegt das Geld) und
-  optional Topf (wofuer ist es da). Ohne Topf = frei verfuegbar.
-- Kontostand = Summe aller Buchungen des Kontos. Topfstand = Summe aller
-  Buchungen des Topfes. Konto x Topf = Summe je Kombination.
+- Geld liegt in "Posten" (z. B. Autoruecklagen bei BBVA). Jeder Posten hat eine
+  Stufe, die sagt, wie verfuegbar das Geld ist (frei, Fixkosten, Ruecklage,
+  langfristig, Verbindlichkeit).
+- Jede Geldbewegung ist eine Buchung auf einem Posten. Saldo = Summe aller
+  Buchungen des Postens.
+- Technisch ist ein Posten ein Konto mit genau einem Standardtopf (Datenbank
+  fin_konten + fin_toepfe). So bleiben die Daten mit dem frueheren
+  Konto-/Topf-Modell kompatibel.
 - Zinsen, die seit der letzten Zins-/Abgleichsbuchung aufgelaufen sind, werden
   taeglich geschaetzt (Saldo x Satz / 365) und erst beim naechsten Abgleich als
   echte Buchung festgeschrieben.
@@ -50,6 +54,40 @@ TOPF_ARTEN = {
     "puffer": "Puffer / Notgroschen",
     "investment": "Investment",
 }
+
+STUFEN = {  # Reihenfolge = von "sofort verfuegbar" bis "gebunden"
+    "frei": "Frei verfügbar",
+    "fixkosten": "Fixkosten reserviert",
+    "ruecklage": "Rücklagen & Puffer",
+    "langfristig": "Langfristig (nur im Notfall)",
+    "verbindlichkeit": "Für Verbindlichkeiten",
+}
+STUFE_ERKLAERUNG = {
+    "frei": "Kann ausgegeben werden, ohne dass ein Plan wackelt.",
+    "fixkosten": "Für regelmäßige Kosten zurückgelegt (monatlich und alle paar Monate).",
+    "ruecklage": "Zweckgebunden, aber kurzfristig erreichbar (Auto, Strafzettel, Notgroschen).",
+    "langfristig": "Angelegt und gedanklich abgeschrieben, nur im absoluten Notfall.",
+    "verbindlichkeit": "Liegt für eine Schuld bereit (z. B. Geldbuße).",
+}
+STUFE_FARBEN = {
+    "frei": "#34d399", "fixkosten": "#38bdf8", "ruecklage": "#f59e0b",
+    "langfristig": "#a78bfa", "verbindlichkeit": "#f87171",
+}
+# Art des automatisch angelegten Topfes je Stufe (nur fuer die Kompatibilitaet
+# mit dem frueheren Konto-/Topf-Modell)
+STUFE_TOPF_ART = {
+    "frei": "frei", "fixkosten": "ruecklage", "ruecklage": "puffer",
+    "langfristig": "investment", "verbindlichkeit": "ruecklage",
+}
+
+INTERVALLE = {1: "monatlich", 2: "alle 2 Monate", 3: "vierteljährlich", 4: "alle 4 Monate",
+              6: "halbjährlich", 12: "jährlich"}
+
+# Ab so vielen Wochen wird die gemessene Depot-Rendite automatisch als
+# erwartete Rendite des Postens uebernommen. Darunter ist die Hochrechnung
+# auf ein Jahr zu zufaellig (eine gute Woche = scheinbar +200 % p. a.).
+MIN_WOCHEN_RENDITE = 12
+RENDITE_FENSTER_WOCHEN = 52
 
 RISIKO_STUFEN = {
     1: "1 – Einlagensicherung / Bargeld",
@@ -186,21 +224,6 @@ def aufgelaufene_zinsen(buchungen: pd.DataFrame, konten: pd.DataFrame,
 
 # --- Ueberblick ---------------------------------------------------------------------
 
-@dataclass
-class Ueberblick:
-    konten: pd.DataFrame        # je Konto: Salden, Satz, Tagesertrag
-    toepfe: pd.DataFrame        # je Topf (inkl. "frei"): Stand, Ziel
-    matrix: pd.DataFrame        # Konto x Topf
-    brutto: float
-    verbindlichkeiten_offen: float
-    netto: float
-    frei: float
-    zweckgebunden: float
-    ertrag_tag_zins: float      # Zinsen, recht sicher
-    ertrag_tag_dividende: float  # erwartete Ausschuettungen
-    ertrag_tag_markt: float     # erwartete Kursrendite (Annahme)
-
-
 def verbindlichkeiten_offen(verbindlichkeiten: pd.DataFrame, buchungen: pd.DataFrame) -> pd.DataFrame:
     """Offener Betrag je Verbindlichkeit = Gesamtbetrag - Tilgungen (Ausgaben
     mit Verweis auf die Verbindlichkeit)."""
@@ -216,50 +239,67 @@ def verbindlichkeiten_offen(verbindlichkeiten: pd.DataFrame, buchungen: pd.DataF
     return v
 
 
-def ueberblick(konten: pd.DataFrame, toepfe: pd.DataFrame, buchungen: pd.DataFrame,
-               zinssaetze: pd.DataFrame, verbindlichkeiten: pd.DataFrame, heute) -> Ueberblick:
+@dataclass
+class Ueberblick:
+    posten: pd.DataFrame        # je Posten: Salden, Satz, Tagesertrag, Ziel, Stufe
+    stufen: pd.Series           # Summe je Stufe (Reihenfolge wie STUFEN)
+    brutto: float
+    verbindlichkeiten_offen: float
+    netto: float
+    frei: float
+    ertrag_tag_zins: float      # Zinsen, recht sicher
+    ertrag_tag_dividende: float  # erwartete Ausschuettungen
+    ertrag_tag_markt: float     # erwartete Kursrendite (gemessen oder Annahme)
+
+
+def ueberblick(posten: pd.DataFrame, buchungen: pd.DataFrame, zinssaetze: pd.DataFrame,
+               verbindlichkeiten: pd.DataFrame | None, heute, ziele: dict | None = None) -> Ueberblick:
+    """posten = fin_konten (mit Spalte stufe). ziele: konto_id -> Zielbetrag."""
     heute = _datum(heute)
     b = buchungen[buchungen["datum"] <= heute]
 
     gebucht = gebuchte_salden(b, heute)
-    zinsen = aufgelaufene_zinsen(b, konten, zinssaetze, heute)
+    zinsen = aufgelaufene_zinsen(b, posten, zinssaetze, heute)
 
-    k = konten.copy()
-    k["gebucht"] = k["id"].map(gebucht).fillna(0.0)
-    k["aufgelaufen"] = k["id"].map(zinsen).fillna(0.0)
-    k["saldo"] = k["gebucht"] + k["aufgelaufen"]
-    k["satz_pa"] = [satz_am(zinssaetze, kid, heute) for kid in k["id"]]
-    k["ertrag_tag"] = k["saldo"].clip(lower=0) * k["satz_pa"] / 100 / TAGE_PRO_JAHR
-    letzte_bestaetigung = (b[b["typ"].isin(ZINS_RESET_TYPEN)].groupby("konto_id")["datum"].max())
-    k["bestaetigt_am"] = k["id"].map(letzte_bestaetigung)
+    p = posten.copy()
+    if "stufe" not in p.columns:
+        p["stufe"] = "frei"
+    p["stufe"] = p["stufe"].fillna("frei")
+    p["gebucht"] = p["id"].map(gebucht).fillna(0.0)
+    p["aufgelaufen"] = p["id"].map(zinsen).fillna(0.0)
+    p["saldo"] = p["gebucht"] + p["aufgelaufen"]
+    p["satz_pa"] = [satz_am(zinssaetze, kid, heute) for kid in p["id"]]
+    p["ertrag_tag"] = p["saldo"].clip(lower=0) * p["satz_pa"] / 100 / TAGE_PRO_JAHR
+    letzte_bestaetigung = b[b["typ"].isin(ZINS_RESET_TYPEN)].groupby("konto_id")["datum"].max()
+    # ueber dict mappen: bei leerer Postenliste scheitert pandas sonst am Datumstyp
+    p["bestaetigt_am"] = pd.to_datetime(p["id"].map(letzte_bestaetigung.to_dict()))
+    p["ziel"] = pd.to_numeric(p["id"].map(ziele or {}), errors="coerce")
 
-    # Konto x Topf: gebuchte Betraege + aufgelaufene Zinsen in den Standardtopf
-    m = b.assign(topf=b["topf_id"].fillna(FREI)).groupby(["konto_id", "topf"])["betrag"].sum()
-    for _, row in k[k["aufgelaufen"] != 0].iterrows():
-        ziel = row["standard_topf_id"] if pd.notna(row["standard_topf_id"]) else FREI
-        m.loc[(row["id"], ziel)] = m.get((row["id"], ziel), 0.0) + row["aufgelaufen"]
-    matrix = m.unstack(fill_value=0.0) if not m.empty else pd.DataFrame()
-
-    topf_staende = matrix.sum(axis=0) if not matrix.empty else pd.Series(dtype=float)
-    t = toepfe.copy()
-    t["stand"] = t["id"].map(topf_staende).fillna(0.0)
-    frei_ohne_topf = float(topf_staende.get(FREI, 0.0))
-    frei_toepfe = float(t.loc[t["art"] == "frei", "stand"].sum())
-    frei = frei_ohne_topf + frei_toepfe
+    stufen = p.groupby("stufe")["saldo"].sum().reindex(list(STUFEN), fill_value=0.0)
 
     v = verbindlichkeiten_offen(verbindlichkeiten, b)
     offen = float(v["offen"].sum()) if not v.empty else 0.0
-    brutto = float(k["saldo"].sum())
+    brutto = float(p["saldo"].sum())
 
     def ertrag(art):
-        return float(k.loc[k["ertragsart"] == art, "ertrag_tag"].sum())
+        return float(p.loc[p["ertragsart"] == art, "ertrag_tag"].sum())
 
     return Ueberblick(
-        konten=k, toepfe=t, matrix=matrix, brutto=brutto, verbindlichkeiten_offen=offen,
-        netto=brutto - offen, frei=frei, zweckgebunden=brutto - frei,
+        posten=p, stufen=stufen, brutto=brutto, verbindlichkeiten_offen=offen,
+        netto=brutto - offen, frei=float(stufen["frei"]),
         ertrag_tag_zins=ertrag("zins"), ertrag_tag_dividende=ertrag("dividende"),
         ertrag_tag_markt=ertrag("markt"),
     )
+
+
+def stufen_verlauf(buchungen: pd.DataFrame, posten: pd.DataFrame, bis) -> pd.DataFrame:
+    """Taeglicher gebuchter Saldo je Stufe (Spalten in STUFEN-Reihenfolge)."""
+    verlauf = saldo_verlauf(buchungen, bis)
+    if verlauf.empty:
+        return verlauf
+    stufe = posten.set_index("id")["stufe"].fillna("frei")
+    gruppen = verlauf.T.groupby(lambda kid: stufe.get(kid, "frei")).sum().T
+    return gruppen.reindex(columns=[s for s in STUFEN if s in gruppen.columns])
 
 
 def ertrag_verlauf(buchungen: pd.DataFrame, konten: pd.DataFrame, zinssaetze: pd.DataFrame,
@@ -318,6 +358,125 @@ def abgleich(konto: dict | pd.Series, ist_saldo: float, gebuchter_saldo: float, 
     return {"datum": str(_datum(datum).date()), "konto_id": konto["id"], "topf_id": topf,
             "betrag": diff, "typ": typ,
             "beschreibung": f"Abgleich auf {ist_saldo:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")}
+
+
+def gruppen_abgleich(posten: list[dict], ist_gesamt: float, datum) -> list[dict]:
+    """Abgleich mehrerer Posten, die im selben Produkt liegen (z. B. ein
+    Geldmarktfonds fuer Geldbusse und Strafzettel). Die Differenz zum echten
+    Gesamtstand wird im Verhaeltnis der gebuchten Salden verteilt.
+    posten: [{"id", "ertragsart", "standard_topf_id", "gebucht"}, ...]"""
+    if not posten:
+        return []
+    gebucht = np.array([float(p["gebucht"]) for p in posten])
+    diff = _rund(ist_gesamt - gebucht.sum())
+    if abs(diff) < 0.005:
+        return []
+    gewichte = gebucht.clip(min=0)
+    gewichte = gewichte / gewichte.sum() if gewichte.sum() > 0 else np.full(len(posten), 1 / len(posten))
+    anteile = [_rund(diff * g) for g in gewichte[:-1]]
+    anteile.append(_rund(diff - sum(anteile)))  # Rundungsrest an den letzten Posten
+    zeilen = []
+    for p, anteil, geb in zip(posten, anteile, gebucht):
+        z = abgleich(p, geb + anteil, geb, datum)
+        if z is not None:
+            zeilen.append(z)
+    return zeilen
+
+
+# --- Fixkosten ------------------------------------------------------------------------
+
+def fixkosten_normalisieren(df: pd.DataFrame) -> pd.DataFrame:
+    spalten = ["id", "name", "betrag", "intervall_monate", "naechste_faelligkeit", "konto_id",
+               "kategorie", "aktiv", "notiz"]
+    if df is None or df.empty:
+        return pd.DataFrame({c: pd.Series(dtype="object") for c in spalten})
+    df = df.copy()
+    df["betrag"] = pd.to_numeric(df["betrag"], errors="coerce").fillna(0.0).astype(float)
+    df["intervall_monate"] = pd.to_numeric(df["intervall_monate"], errors="coerce").fillna(1).astype(int)
+    df["naechste_faelligkeit"] = pd.to_datetime(df["naechste_faelligkeit"]).dt.normalize()
+    df["aktiv"] = df["aktiv"].fillna(True).astype(bool)
+    return df.sort_values("naechste_faelligkeit").reset_index(drop=True)
+
+
+def monate_weiter(datum, monate: int) -> pd.Timestamp:
+    """Datum + n Monate (31.01. + 1 Monat = 28./29.02.)."""
+    return _datum(datum) + pd.DateOffset(months=int(monate))
+
+
+def monatsende(datum) -> pd.Timestamp:
+    return _datum(datum) + pd.offsets.MonthEnd(0)
+
+
+def soll_heute(betrag: float, intervall: int, faellig, heute) -> float:
+    """Wie viel fuer diese Fixkosten heute zurueckgelegt sein sollte.
+
+    - Monatlich: der volle Betrag, solange er in diesem Monat noch nicht
+      bezahlt ist (Faelligkeit spaetestens am Monatsende), sonst 0.
+    - Alle n Monate: anteilig nach verstrichener Zeit seit der letzten
+      Faelligkeit (linear), am Faelligkeitstag der volle Betrag."""
+    heute, faellig = _datum(heute), _datum(faellig)
+    if faellig <= heute:
+        return float(betrag)
+    if intervall <= 1:
+        return float(betrag) if faellig <= monatsende(heute) else 0.0
+    vorher = monate_weiter(faellig, -intervall)
+    anteil = (heute - vorher).days / max((faellig - vorher).days, 1)
+    return float(betrag) * min(max(anteil, 0.0), 1.0)
+
+
+def fixkosten_soll(fixkosten: pd.DataFrame, heute) -> pd.DataFrame:
+    """Je aktiver Fixkostenposition: Monatsanteil und heutiges Soll."""
+    f = fixkosten[fixkosten["aktiv"]].copy() if not fixkosten.empty else fixkosten.copy()
+    if f.empty:
+        return f.assign(pro_monat=pd.Series(dtype=float), soll=pd.Series(dtype=float))
+    f["pro_monat"] = f["betrag"] / f["intervall_monate"]
+    f["soll"] = [soll_heute(r["betrag"], r["intervall_monate"], r["naechste_faelligkeit"], heute)
+                 for _, r in f.iterrows()]
+    return f
+
+
+def fixkosten_je_posten(fixkosten: pd.DataFrame, salden: pd.Series, heute) -> pd.DataFrame:
+    """Soll/Ist je Posten, aus dem Fixkosten bezahlt werden.
+    Spalten: konto_id, soll, ist, differenz (Ist - Soll), pro_monat."""
+    f = fixkosten_soll(fixkosten, heute)
+    f = f[f["konto_id"].notna()] if not f.empty else f
+    if f.empty:
+        return pd.DataFrame(columns=["konto_id", "soll", "ist", "differenz", "pro_monat"])
+    g = f.groupby("konto_id").agg(soll=("soll", "sum"), pro_monat=("pro_monat", "sum")).reset_index()
+    g["ist"] = g["konto_id"].map(salden).fillna(0.0)
+    g["differenz"] = g["ist"] - g["soll"]
+    return g
+
+
+# --- Depot-Rendite ----------------------------------------------------------------------
+
+@dataclass
+class Rendite:
+    pa: float | None            # hochgerechnete Rendite p. a. in %
+    woche_geo: float | None     # geometrisches Mittel pro Woche in %
+    n_wochen: int
+    uebernehmen: bool           # genug Wochen fuer die automatische Uebernahme
+
+
+def depot_rendite(performance_pct: pd.Series) -> Rendite:
+    """Aus woechentlichen Performance-Werten (in %, zeitlich sortiert) die
+    durchschnittliche Wochenrendite (geometrisch) und deren Hochrechnung auf
+    ein Jahr. Beruecksichtigt die letzten RENDITE_FENSTER_WOCHEN Wochen."""
+    werte = pd.to_numeric(performance_pct, errors="coerce").dropna().tail(RENDITE_FENSTER_WOCHEN)
+    n = len(werte)
+    if n == 0:
+        return Rendite(None, None, 0, False)
+    faktor = float(np.prod(1 + werte.to_numpy() / 100))
+    woche = faktor ** (1 / n) - 1
+    pa = (1 + woche) ** 52 - 1
+    return Rendite(pa * 100, woche * 100, n, n >= MIN_WOCHEN_RENDITE)
+
+
+def depot_index(performance_pct: pd.Series) -> pd.Series:
+    """Wertentwicklung von 100 aus, rein aus den Wochenperformances (ohne
+    Einzahlungen) – zeigt, wie sich 100 € entwickelt haetten."""
+    werte = pd.to_numeric(performance_pct, errors="coerce").fillna(0.0)
+    return 100 * (1 + werte / 100).cumprod()
 
 
 def eur(x: float, nachkomma: int = 2) -> str:

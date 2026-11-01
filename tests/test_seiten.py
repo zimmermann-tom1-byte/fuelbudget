@@ -34,6 +34,10 @@ class FakeQuery:
         self.op, self.payload = "update", werte
         return self
 
+    def upsert(self, rows, on_conflict=""):
+        self.op, self.payload, self.konflikt = "upsert", rows, [c.strip() for c in on_conflict.split(",")]
+        return self
+
     def delete(self):
         self.op = "delete"
         return self
@@ -59,10 +63,23 @@ class FakeQuery:
             return types.SimpleNamespace(data=copy.deepcopy(treffer))
         if self.op == "insert":
             neu = self.payload if isinstance(self.payload, list) else [self.payload]
+            gespeichert = []
             for r in neu:
                 assert r.get("user_id") == UID, "user_id fehlt beim Einfuegen"
-                rows.append({"id": str(uuid.uuid4()), **r})
+                zeile = {"id": str(uuid.uuid4()), **r}
+                rows.append(zeile)
+                gespeichert.append(copy.deepcopy(zeile))
             self.db.setdefault("_log", []).append(("insert", self.table, neu))
+            return types.SimpleNamespace(data=gespeichert)
+        if self.op == "upsert":
+            neu = self.payload if isinstance(self.payload, list) else [self.payload]
+            for r in neu:
+                vorhanden = [x for x in rows if all(x.get(c) == r.get(c) for c in self.konflikt)]
+                if vorhanden:
+                    vorhanden[0].update(r)
+                else:
+                    rows.append({"id": str(uuid.uuid4()), **r})
+            self.db.setdefault("_log", []).append(("upsert", self.table, neu))
             return types.SimpleNamespace(data=neu)
         if self.op == "update":
             for r in treffer:
@@ -140,49 +157,68 @@ def ausfuehren(seite):
 
 
 def beispieldaten(db):
-    db["fin_toepfe"] = [
-        {"id": "t_auto", "user_id": UID, "name": "Autopuffer", "art": "puffer", "zielbetrag": "1600",
-         "sparrate_monat": None, "sortierung": 0, "aktiv": True, "notiz": None},
-        {"id": "t_busse", "user_id": UID, "name": "Geldbuße", "art": "ruecklage", "zielbetrag": None,
-         "sparrate_monat": None, "sortierung": 1, "aktiv": True, "notiz": None},
-        {"id": "t_vers", "user_id": UID, "name": "Versicherung", "art": "ruecklage", "zielbetrag": "300",
-         "sparrate_monat": "50", "sortierung": 2, "aktiv": True, "notiz": None},
-    ]
+    def topf(tid, name, ziel=None):
+        return {"id": tid, "user_id": UID, "name": name, "art": "ruecklage", "zielbetrag": ziel,
+                "sparrate_monat": None, "sortierung": 0, "aktiv": True, "notiz": None}
+
+    def posten(pid, name, art, ertrag, stufe, gruppe=None, institut="Trading 212"):
+        return {"id": pid, "user_id": UID, "name": name, "institut": institut, "art": art, "ertragsart": ertrag,
+                "risiko": 2, "standard_topf_id": "t_" + pid, "sortierung": 0, "aktiv": True, "notiz": None,
+                "stufe": stufe, "abgleich_gruppe": gruppe}
+
+    db["fin_toepfe"] = [topf("t_lohn", "Lohneingangskonto"), topf("t_fix", "Fixkosten monatlich"),
+                        topf("t_fix36", "Fixkosten 3-6 Monate"), topf("t_auto", "Autorücklagen"),
+                        topf("t_straf", "Strafzettelrücklage"), topf("t_busse", "Geldbuße"),
+                        topf("t_tr", "Altersvorsorge", "10000"), topf("t_trcash", "Trade Republic Cash", "800")]
     db["fin_konten"] = [
-        {"id": "k_tr", "user_id": UID, "name": "TR Depot", "institut": "Trade Republic", "art": "depot",
-         "ertragsart": "markt", "risiko": 3, "standard_topf_id": None, "sortierung": 0, "aktiv": True, "notiz": None},
-        {"id": "k_mmf", "user_id": UID, "name": "T212 Geldmarkt", "institut": "Trading 212", "art": "geldmarktfonds",
-         "ertragsart": "zins", "risiko": 2, "standard_topf_id": None, "sortierung": 1, "aktiv": True, "notiz": None},
-        {"id": "k_bbva", "user_id": UID, "name": "BBVA", "institut": "BBVA", "art": "tagesgeld",
-         "ertragsart": "zins", "risiko": 1, "standard_topf_id": "t_auto", "sortierung": 2, "aktiv": True, "notiz": None},
-        {"id": "k_mone", "user_id": UID, "name": "Monefit", "institut": "Monefit", "art": "p2p",
-         "ertragsart": "zins", "risiko": 5, "standard_topf_id": None, "sortierung": 3, "aktiv": True, "notiz": None},
+        posten("lohn", "Lohneingangskonto", "giro", "keine", "frei", institut="Volksbank"),
+        posten("fix", "Fixkosten monatlich", "giro", "keine", "fixkosten", institut="Volksbank"),
+        posten("fix36", "Fixkosten 3-6 Monate", "geldmarktfonds", "zins", "fixkosten"),
+        posten("auto", "Autorücklagen", "tagesgeld", "zins", "ruecklage", institut="BBVA"),
+        posten("straf", "Strafzettelrücklage", "geldmarktfonds", "zins", "ruecklage", "T212 MMF Rücklagen"),
+        posten("busse", "Geldbuße", "geldmarktfonds", "zins", "verbindlichkeit", "T212 MMF Rücklagen"),
+        posten("tr", "Altersvorsorge", "depot", "markt", "langfristig", institut="Trade Republic"),
+        posten("trcash", "Trade Republic Cash", "tagesgeld", "zins", "langfristig", institut="Trade Republic"),
     ]
     db["fin_zinssaetze"] = [
-        {"id": "z1", "user_id": UID, "konto_id": "k_mmf", "gueltig_ab": "2026-10-01", "satz_pa": "2.10", "notiz": None},
-        {"id": "z2", "user_id": UID, "konto_id": "k_mone", "gueltig_ab": "2026-10-01", "satz_pa": "7.5", "notiz": None},
-        {"id": "z3", "user_id": UID, "konto_id": "k_tr", "gueltig_ab": "2026-10-01", "satz_pa": "7", "notiz": None},
+        {"id": f"z{i}", "user_id": UID, "konto_id": k, "gueltig_ab": "2026-11-01", "satz_pa": s, "notiz": None}
+        for i, (k, s) in enumerate([("fix36", "2.5"), ("auto", "3.5"), ("straf", "2.5"), ("busse", "2.5"),
+                                    ("tr", "0"), ("trcash", "2.5")])
     ]
     db["fin_verbindlichkeiten"] = [
         {"id": "v1", "user_id": UID, "name": "Geldbuße", "betrag_gesamt": "1200", "rate_monat": "200",
          "topf_id": "t_busse", "erledigt": False, "notiz": None},
     ]
-    b = lambda **k: {"id": str(uuid.uuid4()), "user_id": UID, "topf_id": None, "kategorie": None,
-                     "beschreibung": None, "gruppe": None, "verbindlichkeit_id": None, **k}
+
+    def bu(**k):
+        return {"id": str(uuid.uuid4()), "user_id": UID, "topf_id": "t_" + k["konto_id"], "kategorie": None,
+                "beschreibung": None, "gruppe": None, "verbindlichkeit_id": None, "typ": "eroeffnung", **k}
     db["fin_buchungen"] = [
-        b(datum="2026-10-01", konto_id="k_tr", betrag="4000", typ="eroeffnung"),
-        b(datum="2026-10-01", konto_id="k_mmf", topf_id="t_busse", betrag="1200", typ="eroeffnung"),
-        b(datum="2026-10-01", konto_id="k_mmf", topf_id="t_vers", betrag="100", typ="eroeffnung"),
-        b(datum="2026-10-01", konto_id="k_mmf", betrag="100", typ="eroeffnung"),
-        b(datum="2026-10-01", konto_id="k_bbva", topf_id="t_auto", betrag="1600", typ="eroeffnung"),
-        b(datum="2026-10-01", konto_id="k_mone", betrag="400", typ="eroeffnung"),
-        b(datum="2026-10-15", konto_id="k_mmf", topf_id="t_busse", betrag="-200", typ="ausgabe",
-          verbindlichkeit_id="v1", kategorie="Sonstiges"),
-        b(datum="2026-10-20", konto_id="k_bbva", topf_id="t_auto", betrag="-89.90", typ="ausgabe", kategorie="Auto"),
+        bu(datum="2026-11-01", konto_id="lohn", betrag="116"),
+        bu(datum="2026-11-01", konto_id="fix", betrag="583"),
+        bu(datum="2026-11-01", konto_id="fix36", betrag="210.04"),
+        bu(datum="2026-11-01", konto_id="auto", betrag="1598.75"),
+        bu(datum="2026-11-01", konto_id="straf", betrag="100.26"),
+        bu(datum="2026-11-01", konto_id="busse", betrag="1203.08"),
+        bu(datum="2026-11-01", konto_id="tr", betrag="4144"),
+        bu(datum="2026-11-01", konto_id="trcash", betrag="744"),
+        bu(datum="2026-11-02", konto_id="auto", betrag="-89.90", typ="ausgabe", kategorie="Auto"),
+    ]
+    db["fin_fixkosten"] = [
+        {"id": "f1", "user_id": UID, "name": "Gym", "betrag": "35", "intervall_monate": 1,
+         "naechste_faelligkeit": "2026-11-15", "konto_id": "fix", "kategorie": "Freizeit", "aktiv": True, "notiz": None},
+        {"id": "f2", "user_id": UID, "name": "Kfz-Versicherung", "betrag": "240", "intervall_monate": 3,
+         "naechste_faelligkeit": "2027-01-01", "konto_id": "fix36", "kategorie": "Versicherungen", "aktiv": True,
+         "notiz": None},
+    ]
+    db["fin_depot_wochen"] = [
+        {"id": f"w{i}", "user_id": UID, "konto_id": "tr", "datum": f"2026-{8 + i // 4:02d}-{1 + (i % 4) * 7:02d}",
+         "performance_pct": "0.2", "depotwert": None, "notiz": None}
+        for i in range(11)
     ]
 
 
-SEITEN = ["vermoegen.py", "buchungen.py", "verwaltung.py"]
+SEITEN = ["vermoegen.py", "buchungen.py", "verwaltung.py", "fixkosten.py", "depot.py"]
 
 
 @pytest.mark.parametrize("seite", SEITEN)
@@ -213,35 +249,42 @@ def _letzter_insert(db, tabelle):
     return eintraege[-1][2] if eintraege else None
 
 
-def test_ausgabe_speichern(umgebung):
+def _cache_leeren(st):
+    for k in [k for k in list(st.session_state) if str(k).startswith("_fin_cache_")]:
+        del st.session_state[k]
+
+
+def test_ausgabe_speichern_bucht_auf_posten_und_topf(umgebung):
     beispieldaten(umgebung.db)
     st = umgebung.st
     st.SUBMIT.add("einnahme_ausgabe_form")
-    st.WERTE.update({"Betrag (€)": 12.5, "Kategorie": "Lebensmittel"})
+    st.WERTE.update({"ea_posten": "auto", "Betrag (€)": 12.5, "Kategorie": "Auto"})
     assert ausfuehren("buchungen.py") == "Rerun"
     zeile = _letzter_insert(umgebung.db, "fin_buchungen")[0]
-    assert zeile["betrag"] == -12.5 and zeile["typ"] == "ausgabe" and zeile["konto_id"] == "k_tr"
+    assert zeile["betrag"] == -12.5 and zeile["konto_id"] == "auto" and zeile["topf_id"] == "t_auto"
 
 
-def test_umbuchung_speichern(umgebung):
+def test_umbuchung_zwischen_posten(umgebung):
     beispieldaten(umgebung.db)
     st = umgebung.st
     st.SUBMIT.add("umbuchung_form")
-    st.WERTE.update({"um_von_konto": "k_mmf", "um_nach_konto": "k_mmf", "um_von_topf": None,
-                     "um_nach_topf": "t_vers", "um_betrag": 50.0})
+    st.WERTE.update({"um_von": "lohn", "um_nach": "fix36", "um_betrag": 80.0})
     assert ausfuehren("buchungen.py") == "Rerun"
-    zeilen = _letzter_insert(umgebung.db, "fin_buchungen")
-    assert sorted(z["betrag"] for z in zeilen) == [-50, 50]
+    zeilen = {z["konto_id"]: z for z in _letzter_insert(umgebung.db, "fin_buchungen")}
+    assert zeilen["lohn"]["betrag"] == -80 and zeilen["fix36"]["betrag"] == 80
+    assert zeilen["fix36"]["topf_id"] == "t_fix36"
 
 
-def test_abgleich_bucht_zinsen(umgebung):
+def test_gruppenabgleich_geldmarktfonds(umgebung):
     beispieldaten(umgebung.db)
     st = umgebung.st
     st.SUBMIT.add("abgleich_form")
-    st.WERTE.update({"abgl_konto": "k_mmf", "abgl_ist_k_mmf": 1203.10, "abgl_datum": date(2026, 10, 31)})
+    einheit = "gruppe:T212 MMF Rücklagen"
+    st.WERTE.update({"abgl_einheit": einheit, f"abgl_ist_{einheit}": 1305.34, "abgl_datum": date(2026, 11, 30)})
     assert ausfuehren("buchungen.py") == "Rerun"
-    zeile = _letzter_insert(umgebung.db, "fin_buchungen")
-    assert zeile[0]["typ"] == "zins" and zeile[0]["betrag"] == pytest.approx(3.10)
+    zeilen = _letzter_insert(umgebung.db, "fin_buchungen")
+    assert {z["konto_id"] for z in zeilen} == {"busse", "straf"}
+    assert sum(z["betrag"] for z in zeilen) == pytest.approx(2.0)
 
 
 def test_loeschen_mit_auswahl(umgebung):
@@ -254,39 +297,103 @@ def test_loeschen_mit_auswahl(umgebung):
     assert len(umgebung.db["fin_buchungen"]) == vorher - 1
 
 
-def test_startbestand_ersetzen(umgebung):
+def test_startbestand_nur_geaenderte_posten(umgebung, monkeypatch):
     beispieldaten(umgebung.db)
     st = umgebung.st
-    st.SUBMIT.add("startbestand_form_k_tr")
+    st.SUBMIT.add("startbestand_form")
+    st.WERTE["Stichtag"] = date(2026, 11, 1)
+    original = st.data_editor
+
+    def editor(df, **k):
+        df = original(df, **k)
+        df.loc[df["id"] == "lohn", "Betrag (€)"] = 150.0
+        return df
+    monkeypatch.setattr(st, "data_editor", editor)
     assert ausfuehren("verwaltung.py") == "Rerun"
-    eroeffnung_tr = [r for r in umgebung.db["fin_buchungen"]
-                     if r["konto_id"] == "k_tr" and r["typ"] == "eroeffnung"]
-    assert len(eroeffnung_tr) == 1 and float(eroeffnung_tr[0]["betrag"]) == 4000
+    eroeffnung = [r for r in umgebung.db["fin_buchungen"] if r["typ"] == "eroeffnung"]
+    lohn = [r for r in eroeffnung if r["konto_id"] == "lohn"]
+    assert len(lohn) == 1 and float(lohn[0]["betrag"]) == 150 and lohn[0]["topf_id"] == "t_lohn"
+    assert len(eroeffnung) == 8  # die anderen bleiben unveraendert
 
 
-def test_konto_und_topf_anlegen(umgebung):
+def test_posten_anlegen_legt_topf_mit_an(umgebung):
     st = umgebung.st
-    st.SUBMIT.update({"topf_form_None"})
-    st.WERTE.update({"Name": "Notgroschen"})
+    st.SUBMIT.add("posten_form_None")
+    st.WERTE.update({"Name": "Notgroschen", "Anbieter": "Volksbank", "Stufe": "ruecklage",
+                     "Zielbetrag (€, optional)": 1000.0})
     assert ausfuehren("verwaltung.py") == "Rerun"
-    assert umgebung.db["fin_toepfe"][0]["name"] == "Notgroschen"
-    st.SUBMIT.clear()
-    st.SUBMIT.add("konto_form_None")
-    st.WERTE.update({"Name": "Sparkasse Giro", "Anbieter": "Sparkasse"})
-    for k in [k for k in list(st.session_state) if str(k).startswith("_fin_cache_")]:
-        del st.session_state[k]
+    konto = umgebung.db["fin_konten"][0]
+    topf = umgebung.db["fin_toepfe"][0]
+    assert konto["standard_topf_id"] == topf["id"] and konto["stufe"] == "ruecklage"
+    assert topf["name"] == "Notgroschen" and topf["zielbetrag"] == 1000 and topf["art"] == "puffer"
+
+
+def test_posten_aendern_haelt_topf_synchron(umgebung):
+    beispieldaten(umgebung.db)
+    st = umgebung.st
+    st.SUBMIT.add("posten_form_auto")
+    st.WERTE.update({"posten_auswahl": "auto", "Name": "Auto-Puffer", "Zielbetrag (€, optional)": 2000.0})
     assert ausfuehren("verwaltung.py") == "Rerun"
-    assert umgebung.db["fin_konten"][0]["institut"] == "Sparkasse"
+    topf = next(t for t in umgebung.db["fin_toepfe"] if t["id"] == "t_auto")
+    assert topf["name"] == "Auto-Puffer" and topf["zielbetrag"] == 2000
+
+
+def test_fixkosten_anlegen(umgebung):
+    beispieldaten(umgebung.db)
+    st = umgebung.st
+    st.SUBMIT.add("fix_form_None")
+    st.WERTE.update({"Name": "Kontaktlinsen", "Betrag (€)": 120.0, "Intervall": 6,
+                     "Nächste Fälligkeit": date(2027, 3, 1), "Bezahlt aus Posten": "fix36"})
+    assert ausfuehren("fixkosten.py") == "Rerun"
+    f = _letzter_insert(umgebung.db, "fin_fixkosten")[0]
+    assert f["intervall_monate"] == 6 and f["naechste_faelligkeit"] == "2027-03-01" and f["konto_id"] == "fix36"
+
+
+def test_fixkosten_als_bezahlt_buchen(umgebung):
+    beispieldaten(umgebung.db)
+    st = umgebung.st
+    st.KNOEPFE.add("bezahlt_f1")
+    assert ausfuehren("fixkosten.py") == "Rerun"
+    zeile = _letzter_insert(umgebung.db, "fin_buchungen")[0]
+    assert zeile["betrag"] == -35 and zeile["konto_id"] == "fix" and zeile["beschreibung"] == "Gym"
+    gym = next(f for f in umgebung.db["fin_fixkosten"] if f["id"] == "f1")
+    assert gym["naechste_faelligkeit"] == "2026-12-15"
+
+
+def test_depot_woche_ab_12_wochen_rendite_uebernehmen(umgebung):
+    beispieldaten(umgebung.db)
+    st = umgebung.st
+    st.SUBMIT.add("depot_woche_form")
+    st.WERTE.update({"Datum": date(2026, 11, 6), "Wochenperformance (%)": 0.2,
+                     "Depotwert gesamt (€, optional)": 4200.0})
+    assert ausfuehren("depot.py") == "Rerun"
+    # Depotwert -> Abgleichsbuchung
+    abgl = _letzter_insert(umgebung.db, "fin_buchungen")[0]
+    assert abgl["konto_id"] == "tr" and abgl["typ"] == "abgleich" and abgl["betrag"] == pytest.approx(56)
+    # 12. Woche -> Rendite als Satz uebernommen (0,2 %/Woche = 10,95 % p. a.)
+    satz = [z for z in umgebung.db["fin_zinssaetze"] if z["konto_id"] == "tr" and z["gueltig_ab"] == "2026-11-06"]
+    assert len(satz) == 1 and satz[0]["satz_pa"] == pytest.approx((1.002 ** 52 - 1) * 100, abs=1e-3)
+
+
+def test_depot_unter_12_wochen_keine_uebernahme(umgebung):
+    beispieldaten(umgebung.db)
+    umgebung.db["fin_depot_wochen"] = umgebung.db["fin_depot_wochen"][:5]
+    st = umgebung.st
+    st.SUBMIT.add("depot_woche_form")
+    st.WERTE.update({"Datum": date(2026, 11, 6), "Wochenperformance (%)": 1.0})
+    assert ausfuehren("depot.py") == "Rerun"
+    assert not [e for e in umgebung.db.get("_log", []) if e[0] == "upsert"]
+    assert not [e for e in umgebung.db.get("_log", []) if e[1] == "fin_buchungen"]
 
 
 def test_zinssatz_anlegen(umgebung):
     beispieldaten(umgebung.db)
     st = umgebung.st
     st.SUBMIT.add("zins_form")
-    st.WERTE.update({"Satz % p. a.": 2.0, "Gültig ab": date(2026, 11, 1)})
+    st.WERTE.update({"Satz % p. a.": 2.0, "Gültig ab": date(2026, 12, 1)})
     assert ausfuehren("verwaltung.py") == "Rerun"
     z = _letzter_insert(umgebung.db, "fin_zinssaetze")[0]
-    assert z["satz_pa"] == 2.0 and z["gueltig_ab"] == "2026-11-01"
+    assert z["satz_pa"] == 2.0 and z["gueltig_ab"] == "2026-12-01"
 
 
 def _tankungen(db):
@@ -316,7 +423,7 @@ def test_app_mit_freischaltung_startet_auf_vermoegen(umgebung, monkeypatch):
     beispieldaten(umgebung.db)
     assert _app_starten(umgebung, monkeypatch) == "fertig"
     titel = [p.title for p in umgebung.st.NAV]
-    assert titel == ["Vermögen", "Buchungen", "Konten & Töpfe", "FuelBudget"]
+    assert titel == ["Vermögen", "Buchungen", "Fixkosten", "Depot-Rendite", "Posten", "FuelBudget"]
 
 
 def test_app_ohne_freischaltung_nur_fuelbudget(umgebung, monkeypatch):
