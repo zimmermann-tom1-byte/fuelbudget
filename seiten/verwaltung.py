@@ -41,8 +41,8 @@ def _text(x):
     return "" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x)
 
 
-tab_start, tab_posten, tab_zins, tab_verb = st.tabs(
-    ["🚀 Start", "📦 Posten", "📈 Zinssätze & Renditen", "📉 Verbindlichkeiten"]
+tab_start, tab_posten, tab_zins, tab_verb, tab_fuel = st.tabs(
+    ["🚀 Start", "📦 Posten", "📈 Zinssätze & Renditen", "📉 Verbindlichkeiten", "⛽ FuelBudget"]
 )
 
 # --- START ------------------------------------------------------------------------
@@ -282,3 +282,34 @@ with tab_verb:
             "Offen": offen["offen"], "Erledigt": offen["erledigt"],
         }), hide_index=True, width="stretch",
             column_config={c: st.column_config.NumberColumn(format="%.2f €") for c in ("Gesamt", "Getilgt", "Offen")})
+
+# --- VERKNUEPFUNG FUELBUDGET ---------------------------------------------------------
+with tab_fuel:
+    st.caption(
+        "Jede Tankung, die du in FuelBudget einträgst, wird automatisch als Ausgabe (Kategorie Auto) auf "
+        "diesem Posten gebucht. Änderst oder löschst du die Tankung in FuelBudget, passiert dasselbe hier. "
+        "Tankungen vor dem Startbestand des Postens werden nicht gebucht, weil sie darin schon enthalten sind."
+    )
+    einst = daten.einstellungen()
+    aktuell = einst.get("tank_konto_id")
+    t_opt = [None] + list(posten.loc[posten["aktiv"], "id"])
+    if aktuell and aktuell not in t_opt:
+        t_opt.append(aktuell)
+    with st.form("tank_form"):
+        tank = st.selectbox("Tankungen buchen auf", t_opt,
+                            index=t_opt.index(aktuell) if aktuell in t_opt else 0,
+                            format_func=lambda k: "– aus –" if k is None else posten_name.get(k, k))
+        ok = st.form_submit_button("Speichern", type="primary", width="stretch")
+    if ok:
+        def _tank():
+            daten.tank_posten_setzen(tank)
+        if tank is None:
+            _schreiben(_tank, "Automatische Tank-Buchung ausgeschaltet.")
+        else:
+            start = b.startdatum(d["buchungen"], tank)
+            ab = f" ab {start:%d.%m.%Y}" if start is not None else ""
+            _schreiben(_tank, f"Tankungen werden jetzt auf „{posten_name[tank]}“ gebucht. "
+                              f"Offene Tankungen{ab} wurden nachgebucht.")
+    verknuepft = d["buchungen"][d["buchungen"]["tank_id"].notna()]
+    if aktuell:
+        st.caption(f"Bisher {len(verknuepft)} Tankung(en) übernommen, zusammen {eur(-float(verknuepft['betrag'].sum()))}.")

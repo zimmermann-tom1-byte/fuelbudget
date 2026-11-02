@@ -21,6 +21,24 @@ posten, toepfe = d["konten"], d["toepfe"]
 
 st.title("Vermögen 💶")
 
+# --- DATENPRUEFUNG: Buchungen vor dem Startbestand zaehlen doppelt ---------------
+falsch = b.vor_startbestand(d["buchungen"])
+if not falsch.empty:
+    namen = dict(zip(posten["id"], posten["name"]))
+    liste = "\n".join(f"- {r['datum']:%d.%m.%Y} · {namen.get(r['konto_id'], '?')} · {eur(r['betrag'])} "
+                      f"({r['typ']})" for _, r in falsch.iterrows())
+    st.error(
+        f"**Datenprüfung: {len(falsch)} Buchung(en) liegen vor dem Startbestand ihres Postens** und "
+        f"werden dadurch doppelt gezählt (zusammen {eur(float(falsch['betrag'].sum()))}).\n\n{liste}"
+    )
+    if st.button("🧹 Diese Buchungen entfernen", type="primary", key="datencheck_bereinigen"):
+        try:
+            daten.loeschen("buchungen", list(falsch["id"]))
+        except Exception as exc:
+            st.error(daten.fehlertext(exc))
+        else:
+            daten.nach_schreibzugriff(f"{len(falsch)} Buchung(en) entfernt. Die Summen stimmen wieder.")
+
 if posten.empty:
     st.info("Noch keine Posten angelegt. Unter **Posten** führt dich der Tab „Start“ durch die Einrichtung.")
     st.page_link("seiten/verwaltung.py", label="Zu den Posten", icon="🗂️")

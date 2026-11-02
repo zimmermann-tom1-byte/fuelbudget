@@ -444,3 +444,46 @@ def test_finanzseite_setzt_nutzer_token(umgebung):
     assert ausfuehren("vermoegen.py") == "fertig"
     assert umgebung.client.postgrest.token == "nutzer-token"
     assert umgebung.client.options.headers["Authorization"] == "Bearer nutzer-token"
+
+
+def test_depot_wert_vor_startbestand_wird_nicht_gebucht(umgebung):
+    """Regression 01.11.: Wocheneintrag am 30.10. (vor Startbestand 01.11.) mit Depotwert
+    hat den Wert ein zweites Mal gebucht."""
+    beispieldaten(umgebung.db)
+    st = umgebung.st
+    st.SUBMIT.add("depot_woche_form")
+    st.WERTE.update({"Datum": date(2026, 10, 30), "Wochenperformance (%)": -0.28,
+                     "Depotwert gesamt (€, optional)": 4144.0})
+    assert ausfuehren("depot.py") == "Rerun"
+    assert not [e for e in umgebung.db.get("_log", []) if e[0] == "insert" and e[1] == "fin_buchungen"]
+    assert _letzter_insert(umgebung.db, "fin_depot_wochen")[0]["performance_pct"] == -0.28
+    assert "vor dem Startbestand" in st.session_state["flash"]
+
+
+def test_datenpruefung_bereinigt_buchung_vor_startbestand(umgebung):
+    beispieldaten(umgebung.db)
+    umgebung.db["fin_buchungen"].append({
+        "id": "falsch", "user_id": UID, "datum": "2026-10-30", "konto_id": "tr", "topf_id": "t_tr",
+        "betrag": "4144", "typ": "abgleich", "kategorie": None, "beschreibung": None, "gruppe": None,
+        "verbindlichkeit_id": None})
+    st = umgebung.st
+    st.KNOEPFE.add("datencheck_bereinigen")
+    assert ausfuehren("vermoegen.py") == "Rerun"
+    assert not [r for r in umgebung.db["fin_buchungen"] if r["id"] == "falsch"]
+
+
+def test_tank_posten_setzen(umgebung):
+    beispieldaten(umgebung.db)
+    st = umgebung.st
+    st.SUBMIT.add("tank_form")
+    st.WERTE["Tankungen buchen auf"] = "lohn"
+    assert ausfuehren("verwaltung.py") == "Rerun"
+    assert umgebung.db["fin_einstellungen"][0]["tank_konto_id"] == "lohn"
+    assert "Lohneingangskonto" in st.session_state["flash"]
+
+
+def test_fehlertext_gibt_startbestand_regel_weiter(umgebung):
+    from finanzen import daten
+    exc = Exception("{'code': 'P0001'}")
+    exc.message = "Die Buchung vom 30.10.2026 liegt vor dem Startbestand dieses Postens (01.11.2026)."
+    assert daten.fehlertext(exc) == exc.message

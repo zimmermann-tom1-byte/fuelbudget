@@ -119,6 +119,7 @@ def leere_buchungen() -> pd.DataFrame:
         "betrag": pd.Series(dtype="float"), "typ": pd.Series(dtype="object"),
         "kategorie": pd.Series(dtype="object"), "beschreibung": pd.Series(dtype="object"),
         "gruppe": pd.Series(dtype="object"), "verbindlichkeit_id": pd.Series(dtype="object"),
+        "tank_id": pd.Series(dtype="object"),
     })
 
 
@@ -381,6 +382,27 @@ def gruppen_abgleich(posten: list[dict], ist_gesamt: float, datum) -> list[dict]
         if z is not None:
             zeilen.append(z)
     return zeilen
+
+
+def vor_startbestand(buchungen: pd.DataFrame) -> pd.DataFrame:
+    """Buchungen, die vor dem Startbestand ihres Postens liegen.
+
+    Der Startbestand ist der Anker eines Postens: Alles davor ist schon in ihm
+    enthalten. Eine Buchung davor zaehlt doppelt (so geschehen mit einem
+    Depot-Abgleich vom 30.10. bei Startbestand 01.11.). Die Datenbank laesst
+    solche Buchungen inzwischen nicht mehr zu; diese Pruefung findet Altfaelle."""
+    if buchungen.empty:
+        return buchungen
+    start = buchungen[buchungen["typ"] == "eroeffnung"].groupby("konto_id")["datum"].min()
+    b = buchungen[buchungen["typ"] != "eroeffnung"]
+    grenze = b["konto_id"].map(start.to_dict())
+    return b[grenze.notna() & (b["datum"] < pd.to_datetime(grenze))]
+
+
+def startdatum(buchungen: pd.DataFrame, konto_id) -> pd.Timestamp | None:
+    """Datum des Startbestands eines Postens (None, wenn keiner gebucht ist)."""
+    e = buchungen[(buchungen["konto_id"] == konto_id) & (buchungen["typ"] == "eroeffnung")]
+    return e["datum"].min() if not e.empty else None
 
 
 # --- Fixkosten ------------------------------------------------------------------------

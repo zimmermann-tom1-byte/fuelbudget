@@ -224,3 +224,17 @@ def test_depot_index():
 def test_eur_format():
     assert b.eur(1234.5) == "1.234,50 €"
     assert b.eur(-0.123, 3) == "-0,123 €"
+
+
+def test_vor_startbestand_findet_doppelte_buchung():
+    """Regression 01.11.: Depot-Abgleich am 30.10. bei Startbestand am 01.11."""
+    bu = buchungen([
+        {"id": "s", "datum": "2026-11-01", "konto_id": "depot", "betrag": 4144, "typ": "eroeffnung"},
+        {"id": "x", "datum": "2026-10-30", "konto_id": "depot", "betrag": 4144, "typ": "abgleich"},
+        {"id": "ok", "datum": "2026-11-02", "konto_id": "depot", "betrag": 10, "typ": "abgleich"},
+        {"id": "g", "datum": "2026-10-01", "konto_id": "giro", "betrag": 5, "typ": "einnahme"},  # kein Startbestand
+    ])
+    assert list(b.vor_startbestand(bu)["id"]) == ["x"]
+    assert b.startdatum(bu, "depot") == pd.Timestamp("2026-11-01")
+    assert b.startdatum(bu, "giro") is None
+    assert b.vor_startbestand(b.leere_buchungen()).empty

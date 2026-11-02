@@ -181,7 +181,8 @@ with tab_liste:
             "Betrag": sicht["betrag"],
             "Typ": sicht["typ"],
             "Kategorie": sicht["kategorie"].fillna(""),
-            "Beschreibung": sicht["beschreibung"].fillna(""),
+            "Beschreibung": (sicht["tank_id"].notna().map({True: "⛽ ", False: ""})
+                             + sicht["beschreibung"].fillna("")),
         })
         ein = sicht.loc[sicht["typ"] == "einnahme", "betrag"].sum()
         aus = sicht.loc[sicht["typ"] == "ausgabe", "betrag"].sum()
@@ -199,6 +200,9 @@ with tab_liste:
         if zeilen:
             ids = list(sicht.loc[zeilen, "id"])
             hat_gruppe = sicht.loc[zeilen, "gruppe"].notna().any()
+            if sicht.loc[zeilen, "tank_id"].notna().any():
+                st.info("⛽ Tankungen kommen aus FuelBudget. Ändern oder löschen am besten dort, "
+                        "dann zieht die Buchung hier automatisch mit.")
             st.warning(f"{len(ids)} Buchung(en) ausgewählt"
                        + (" – Umbuchungen werden mitsamt Gegenbuchung gelöscht." if hat_gruppe else "."))
             if st.button("🗑️ Ausgewählte löschen", type="primary"):

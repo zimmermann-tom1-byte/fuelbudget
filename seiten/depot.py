@@ -69,9 +69,12 @@ k4.metric("Aktuell im Tool hinterlegt", f"{satz_jetzt:.2f} % p. a.")
 # --- ERFASSEN ---------------------------------------------------------------------
 st.markdown("### Woche eintragen")
 letzter_freitag = heute - pd.Timedelta(days=(heute.weekday() - 4) % 7)
+start = b.startdatum(d["buchungen"], konto_id)
+# Vorschlag nie vor dem Startbestand: Ein Depotwert davor wuerde doppelt zaehlen
+vorschlag = max(letzter_freitag, start) if start is not None else letzter_freitag
 with st.form("depot_woche_form", clear_on_submit=True):
     c1, c2, c3 = st.columns(3)
-    datum = c1.date_input("Datum", value=letzter_freitag.date(), format="DD.MM.YYYY")
+    datum = c1.date_input("Datum", value=vorschlag.date(), format="DD.MM.YYYY")
     perf = c2.number_input("Wochenperformance (%)", value=0.0, step=0.01, format="%.2f",
                            help="Wie in der App angezeigt (1 Woche), z. B. 1,25 oder −0,80.")
     wert = c3.number_input("Depotwert gesamt (€, optional)", min_value=0.0, value=None, step=1.0, format="%.2f",
@@ -93,7 +96,10 @@ if ok:
                 "konto_id": konto_id, "datum": str(datum), "performance_pct": round(perf, 4),
                 "depotwert": round(wert, 2) if wert is not None else None, "notiz": notiz.strip() or None,
             })
-            if wert is not None:
+            if wert is not None and start is not None and pd.Timestamp(datum) < start:
+                meldung.append(f"Depotwert nicht gebucht: Das Datum liegt vor dem Startbestand "
+                               f"({start:%d.%m.%Y}), der diesen Wert schon enthält.")
+            elif wert is not None:
                 gebucht = float(b.gebuchte_salden(d["buchungen"], datum).get(konto_id, 0.0))
                 zeile = b.abgleich(konto, wert, gebucht, datum)
                 if zeile is not None:

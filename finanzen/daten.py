@@ -36,7 +36,7 @@ _SPALTEN = {
     "zinssaetze": ["id", "konto_id", "gueltig_ab", "satz_pa", "notiz"],
     "verbindlichkeiten": ["id", "name", "betrag_gesamt", "rate_monat", "topf_id", "erledigt", "notiz"],
     "buchungen": ["id", "datum", "konto_id", "topf_id", "betrag", "typ", "kategorie",
-                  "beschreibung", "gruppe", "verbindlichkeit_id", "erstellt_am"],
+                  "beschreibung", "gruppe", "verbindlichkeit_id", "erstellt_am", "tank_id"],
     "fixkosten": ["id", "name", "betrag", "intervall_monate", "naechste_faelligkeit", "konto_id",
                   "kategorie", "aktiv", "notiz"],
     "depot_wochen": ["id", "konto_id", "datum", "performance_pct", "depotwert", "notiz"],
@@ -187,6 +187,9 @@ def buchungsgruppe_loeschen(ids: list[str]) -> int:
 def fehlertext(exc: Exception) -> str:
     """Datenbankfehler in verstaendliche Saetze uebersetzen."""
     t = str(exc)
+    meldung = getattr(exc, "message", None) or t
+    if "Startbestand" in meldung:  # Pruefregel der Datenbank (Buchung vor dem Startbestand)
+        return meldung
     if "23503" in t or "foreign key" in t.lower():
         return ("Das geht nicht, weil noch Buchungen darauf verweisen. "
                 "Deaktiviere den Eintrag stattdessen.")
@@ -197,6 +200,29 @@ def fehlertext(exc: Exception) -> str:
     if "23514" in t or "check constraint" in t.lower():
         return "Ein Wert ist ungültig (z. B. leerer Name oder Betrag 0)."
     return f"Speichern fehlgeschlagen: {t}"
+
+
+# --- Einstellungen (eine Zeile je Nutzer) -----------------------------------------------
+
+def einstellungen() -> dict:
+    key = _PREFIX + "einstellungen"
+    eintrag = st.session_state.get(key)
+    if eintrag and time.time() - eintrag[0] < CACHE_SEKUNDEN:
+        return eintrag[1]
+    res = (anmeldung.client().table("fin_einstellungen").select("*")
+           .eq("user_id", _uid()).limit(1).execute())
+    wert = (res.data or [{}])[0]
+    st.session_state[key] = (time.time(), wert)
+    return wert
+
+
+def tank_posten_setzen(konto_id: str | None) -> None:
+    """Posten, auf den Tankungen aus FuelBudget automatisch gebucht werden.
+    Die Datenbank bucht beim Setzen alle offenen Tankungen ab dem Startbestand
+    dieses Postens nach (Trigger)."""
+    anmeldung.client().table("fin_einstellungen").upsert(
+        {"user_id": _uid(), "tank_konto_id": konto_id}, on_conflict="user_id").execute()
+    cache_leeren()
 
 
 def nach_schreibzugriff(meldung: str) -> None:
