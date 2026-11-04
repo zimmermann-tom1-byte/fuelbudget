@@ -27,19 +27,24 @@ TABELLEN = {
     "buchungen": "fin_buchungen",
     "fixkosten": "fin_fixkosten",
     "depot_wochen": "fin_depot_wochen",
+    "kurse": "fin_kurse",
 }
 
 _SPALTEN = {
     "konten": ["id", "name", "institut", "art", "ertragsart", "risiko", "standard_topf_id",
-               "sortierung", "aktiv", "notiz", "stufe", "abgleich_gruppe"],
-    "toepfe": ["id", "name", "art", "zielbetrag", "sparrate_monat", "sortierung", "aktiv", "notiz"],
+               "sortierung", "aktiv", "notiz", "stufe", "abgleich_gruppe", "bewertung", "wkn",
+               "ertrag_ausgezahlt"],
+    "toepfe": ["id", "name", "art", "zielbetrag", "sparrate_monat", "sortierung", "aktiv", "notiz",
+               "konto_id", "stufe"],
     "zinssaetze": ["id", "konto_id", "gueltig_ab", "satz_pa", "notiz"],
     "verbindlichkeiten": ["id", "name", "betrag_gesamt", "rate_monat", "topf_id", "erledigt", "notiz"],
     "buchungen": ["id", "datum", "konto_id", "topf_id", "betrag", "typ", "kategorie",
-                  "beschreibung", "gruppe", "verbindlichkeit_id", "erstellt_am", "tank_id"],
+                  "beschreibung", "gruppe", "verbindlichkeit_id", "erstellt_am", "tank_id", "anteile"],
     "fixkosten": ["id", "name", "betrag", "intervall_monate", "naechste_faelligkeit", "konto_id",
-                  "kategorie", "aktiv", "notiz"],
+                  "kategorie", "aktiv", "notiz", "topf_id", "modus", "rate_monat", "rest_regel",
+                  "rest_topf_id", "auto_abbuchen", "prognose_fuelbudget"],
     "depot_wochen": ["id", "konto_id", "datum", "performance_pct", "depotwert", "notiz"],
+    "kurse": ["id", "konto_id", "datum", "kurs", "wert", "notiz"],
 }
 
 
@@ -77,6 +82,8 @@ def laden(name: str) -> pd.DataFrame:
     if name == "konten":
         df["risiko"] = pd.to_numeric(df["risiko"], errors="coerce").fillna(1).astype(int)
         df["stufe"] = df["stufe"].fillna("frei")
+        df["bewertung"] = df["bewertung"].fillna("saldo")
+        df["ertrag_ausgezahlt"] = df["ertrag_ausgezahlt"].fillna(False).astype(bool)
     if name == "toepfe":
         for col in ("zielbetrag", "sparrate_monat"):
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -86,6 +93,8 @@ def laden(name: str) -> pd.DataFrame:
         df = b.zinssaetze_normalisieren(df)
     if name == "fixkosten":
         df = b.fixkosten_normalisieren(df)
+    if name == "kurse":
+        df = b.kurse_normalisieren(df)
     if name == "depot_wochen":
         df["datum"] = pd.to_datetime(df["datum"]).dt.normalize()
         df["performance_pct"] = pd.to_numeric(df["performance_pct"], errors="coerce")
@@ -125,39 +134,31 @@ def einfuegen_oder_ersetzen(name: str, zeile: dict, konflikt: str) -> None:
     cache_leeren()
 
 
-# --- Posten = Konto + eigener Topf -----------------------------------------------------
-# Die App zeigt nur Posten. Damit die Daten mit dem frueheren Konto-/Topf-Modell
-# kompatibel bleiben, bekommt jeder Posten im Hintergrund einen gleichnamigen
-# Topf (Standardtopf), auf den alle seine Buchungen laufen.
+# --- Konten und Toepfe -------------------------------------------------------------------
+# Jeder Topf gehoert genau einem Konto. Ein neues Konto bekommt sofort einen ersten
+# Topf (Standardtopf), damit es auch ohne weitere Aufteilung direkt nutzbar ist.
 
-def posten_anlegen(werte: dict, ziel: float | None) -> str:
-    topf = einfuegen("toepfe", {
-        "name": werte["name"], "art": b.STUFE_TOPF_ART[werte["stufe"]], "zielbetrag": ziel,
-        "sortierung": werte.get("sortierung", 0), "aktiv": werte.get("aktiv", True),
-    })[0]
-    konto = einfuegen("konten", {**werte, "standard_topf_id": topf["id"]})[0]
+def konto_anlegen(werte: dict, erster_topf: dict) -> str:
+    konto = einfuegen("konten", werte)[0]
+    topf = einfuegen("toepfe", {"art": b.STUFE_TOPF_ART[erster_topf["stufe"]], **erster_topf,
+                                "konto_id": konto["id"]})[0]
+    aendern("konten", konto["id"], {"standard_topf_id": topf["id"]})
     return konto["id"]
 
 
-def posten_aendern(konto_id: str, topf_id: str | None, werte: dict, ziel: float | None) -> None:
-    if topf_id:
-        aendern("toepfe", topf_id, {"name": werte["name"], "zielbetrag": ziel,
-                                    "art": b.STUFE_TOPF_ART[werte["stufe"]],
-                                    "aktiv": werte.get("aktiv", True)})
-        aendern("konten", konto_id, werte)
-    else:  # Posten ohne Topf (z. B. aus dem frueheren Modell): Topf nachruesten
-        topf = einfuegen("toepfe", {"name": werte["name"], "art": b.STUFE_TOPF_ART[werte["stufe"]],
-                                    "zielbetrag": ziel, "aktiv": werte.get("aktiv", True)})[0]
-        aendern("konten", konto_id, {**werte, "standard_topf_id": topf["id"]})
+def topf_anlegen(werte: dict) -> str:
+    return einfuegen("toepfe", {"art": b.STUFE_TOPF_ART[werte["stufe"]], **werte})[0]["id"]
 
 
-def posten_loeschen(konto_id: str, topf_id: str | None) -> None:
-    loeschen("konten", [konto_id])  # scheitert bewusst, solange Buchungen existieren
-    if topf_id:
-        try:
-            loeschen("toepfe", [topf_id])
-        except Exception:
-            pass  # Topf wird noch von alten Buchungen genutzt -> liegen lassen
+def konto_buchungen_speichern(zeilen: list[dict], kurse: pd.DataFrame, zinssaetze: pd.DataFrame,
+                              konten: pd.DataFrame) -> None:
+    """Buchungen speichern; bei Fonds-Konten die Anteile zum Tageskurs ergaenzen."""
+    bewertung = konten.set_index("id")["bewertung"].to_dict()
+    for z in zeilen:
+        if bewertung.get(z["konto_id"]) == "anteile" and z.get("anteile") is None:
+            kurs, _ = b.kurs_geschaetzt(kurse, zinssaetze, z["konto_id"], z["datum"])
+            z["anteile"] = b.anteile_fuer(z["betrag"], kurs)
+    einfuegen("buchungen", zeilen)
 
 
 def aendern(name: str, zeilen_id: str, werte: dict) -> None:
@@ -216,15 +217,91 @@ def einstellungen() -> dict:
     return wert
 
 
-def tank_posten_setzen(konto_id: str | None) -> None:
-    """Posten, auf den Tankungen aus FuelBudget automatisch gebucht werden.
-    Die Datenbank bucht beim Setzen alle offenen Tankungen ab dem Startbestand
-    dieses Postens nach (Trigger)."""
+def einstellungen_setzen(werte: dict) -> None:
+    """z. B. tank_topf_id (Tankungen aus FuelBudget -> Topf; die Datenbank bucht
+    beim Setzen offene Tankungen nach) oder lohn_topf_id (Quelle des Lohn-Assistenten)."""
     anmeldung.client().table("fin_einstellungen").upsert(
-        {"user_id": _uid(), "tank_konto_id": konto_id}, on_conflict="user_id").execute()
+        {"user_id": _uid(), **werte}, on_conflict="user_id").execute()
     cache_leeren()
+
+
+# --- FuelBudget-Prognose fuer das Kraftstoff-Budget -------------------------------------
+
+def kraftstoff_prognose(heute) -> dict:
+    """Monatsprognose aus den Tankungen (Tabelle transactions, wie FuelBudget)."""
+    import forecast
+    key = _PREFIX + "kraftstoff_prognose"
+    eintrag = st.session_state.get(key)
+    if eintrag and time.time() - eintrag[0] < CACHE_SEKUNDEN:
+        return eintrag[1]
+    res = (anmeldung.client().table("transactions").select("date,amount")
+           .eq("user_id", _uid()).execute())
+    df = pd.DataFrame(res.data or [])
+    if df.empty:
+        wert = {"monat": 0.0, "woche": 0.0, "label": "keine Tankungen"}
+    else:
+        df["date"] = pd.to_datetime(df["date"])
+        df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
+        wert = forecast.monatsprognose(df, pd.Timestamp(heute))
+    st.session_state[key] = (time.time(), wert)
+    return wert
+
+
+# --- Automatische Lastschriften -------------------------------------------------------------
+
+def lastschriften_buchen(d: dict, heute) -> int:
+    """Bucht faellige automatische Lastschriften (z. B. Gym, Claude) und schiebt
+    die Faelligkeit weiter. Wird beim Oeffnen der Finanzseiten ausgefuehrt."""
+    faellig = b.faellige_abbuchungen(d["fixkosten"], heute)
+    if not faellig:
+        return 0
+    u = b.ueberblick(d["konten"], d["toepfe"], d["buchungen"], d["zinssaetze"], d["verbindlichkeiten"],
+                     heute, d["kurse"])
+    werte = u.toepfe.set_index("topf_key")["wert"].to_dict()
+    bewertung = d["konten"].set_index("id")["bewertung"].to_dict()
+    neue_faelligkeit = {}
+    zeilen = []
+    for f, datum in faellig:
+        if not isinstance(f.get("topf_id"), str):
+            continue
+        start = b.startdatum(d["buchungen"], f["konto_id"])
+        if start is not None and datum < start:
+            # vor dem Startbestand: ist dort schon enthalten -> nur Faelligkeit weiterschieben
+            neue_faelligkeit[f["id"]] = b.monate_weiter(datum, f["intervall_monate"])
+            continue
+        kurs, _ = b.kurs_geschaetzt(d["kurse"], d["zinssaetze"], f["konto_id"], datum)
+        neu = b.zahlung_buchen(f, f["betrag"], datum, werte.get(f["topf_id"], 0.0),
+                               bewertung.get(f["konto_id"], "saldo"), kurs)
+        for z in neu:
+            z["beschreibung"] = f"{f['name']} (Lastschrift, automatisch)" if z["typ"] == "ausgabe" else z["beschreibung"]
+            werte[z["topf_id"]] = werte.get(z["topf_id"], 0.0) + z["betrag"]
+        zeilen.extend(neu)
+        neue_faelligkeit[f["id"]] = b.monate_weiter(datum, f["intervall_monate"])
+    if zeilen:
+        einfuegen("buchungen", zeilen)
+    for fid, datum in neue_faelligkeit.items():
+        aendern("fixkosten", fid, {"naechste_faelligkeit": str(datum.date())})
+    return len([z for z in zeilen if z["typ"] == "ausgabe"])
 
 
 def nach_schreibzugriff(meldung: str) -> None:
     st.session_state["flash"] = meldung
     st.rerun()
+
+
+def alles_aktuell(heute) -> dict[str, pd.DataFrame]:
+    """Alle Daten laden und vorher (einmal pro Sitzung und Tag) faellige
+    automatische Lastschriften buchen. Meldet gebuchte Lastschriften per Toast."""
+    d = alles()
+    marker = f"_lastschriften_{pd.Timestamp(heute).date()}"
+    if not st.session_state.get(marker):
+        st.session_state[marker] = True
+        try:
+            n = lastschriften_buchen(d, heute)
+        except Exception as exc:
+            st.warning(f"Automatische Lastschriften konnten nicht gebucht werden: {fehlertext(exc)}")
+            n = 0
+        if n:
+            st.toast(f"{n} fällige Lastschrift(en) automatisch gebucht.", icon="🔁")
+            d = alles()
+    return d

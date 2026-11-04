@@ -2,14 +2,17 @@
 damit sie sich mit Unit-Tests pruefen laesst.
 
 Grundidee (Hauptbuch):
-- Geld liegt in "Posten" (z. B. Autoruecklagen bei BBVA). Jeder Posten hat eine
-  Stufe, die sagt, wie verfuegbar das Geld ist (frei, Fixkosten, Ruecklage,
-  langfristig, Verbindlichkeit).
-- Jede Geldbewegung ist eine Buchung auf einem Posten. Saldo = Summe aller
-  Buchungen des Postens.
-- Technisch ist ein Posten ein Konto mit genau einem Standardtopf (Datenbank
-  fin_konten + fin_toepfe). So bleiben die Daten mit dem frueheren
-  Konto-/Topf-Modell kompatibel.
+- Konto = Ort, an dem Geld liegt (Volksbank-Fixkostenkonto, T212 Ausgabentopf,
+  Geldmarktfonds, Brieftasche ...).
+- Topf = Zweck innerhalb genau eines Kontos (KFZ-Versicherung, Gym, Geldbusse ...).
+  Die Stufe (frei, Fixkosten, Ruecklage, langfristig, Verbindlichkeit) haengt am Topf.
+- Jede Geldbewegung ist eine Buchung auf Konto + Topf. Einstand eines Topfes =
+  Summe seiner Buchungen.
+- Konten mit Bewertung "saldo": Wert = Einstand + geschaetzte, noch nicht
+  gebuchte Zinsen.
+- Konten mit Bewertung "anteile" (Fonds): Jede Buchung kauft/verkauft Anteile
+  zum Kurs des Tages. Wert eines Topfes = Anteile x aktueller Kurs; die Differenz
+  zum Einstand ist der Buchgewinn.
 - Zinsen, die seit der letzten Zins-/Abgleichsbuchung aufgelaufen sind, werden
   taeglich geschaetzt (Saldo x Satz / 365) und erst beim naechsten Abgleich als
   echte Buchung festgeschrieben.
@@ -119,7 +122,7 @@ def leere_buchungen() -> pd.DataFrame:
         "betrag": pd.Series(dtype="float"), "typ": pd.Series(dtype="object"),
         "kategorie": pd.Series(dtype="object"), "beschreibung": pd.Series(dtype="object"),
         "gruppe": pd.Series(dtype="object"), "verbindlichkeit_id": pd.Series(dtype="object"),
-        "tank_id": pd.Series(dtype="object"),
+        "tank_id": pd.Series(dtype="object"), "anteile": pd.Series(dtype="float"),
     })
 
 
@@ -135,6 +138,7 @@ def buchungen_normalisieren(df: pd.DataFrame) -> pd.DataFrame:
     df["datum"] = pd.to_datetime(df["datum"]).dt.normalize()
     df["betrag"] = pd.to_numeric(df["betrag"], errors="coerce").fillna(0.0).astype(float)
     df["topf_id"] = df["topf_id"].where(df["topf_id"].notna(), None)
+    df["anteile"] = pd.to_numeric(df["anteile"], errors="coerce")
     return df
 
 
@@ -240,67 +244,177 @@ def verbindlichkeiten_offen(verbindlichkeiten: pd.DataFrame, buchungen: pd.DataF
     return v
 
 
+def kurse_normalisieren(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame({"konto_id": pd.Series(dtype="object"), "datum": pd.Series(dtype="datetime64[ns]"),
+                             "kurs": pd.Series(dtype="float"), "wert": pd.Series(dtype="float")})
+    df = df.copy()
+    df["datum"] = pd.to_datetime(df["datum"]).dt.normalize()
+    df["kurs"] = pd.to_numeric(df["kurs"], errors="coerce")
+    df["wert"] = pd.to_numeric(df.get("wert"), errors="coerce")
+    return df.sort_values(["konto_id", "datum"]).reset_index(drop=True)
+
+
+def kurs_geschaetzt(kurse: pd.DataFrame, zinssaetze: pd.DataFrame, konto_id, datum) -> tuple[float | None, pd.Timestamp | None]:
+    """Kurs eines Fonds-Kontos an einem Tag: letzter eingetragener Kurs,
+    seitdem mit dem hinterlegten Satz fortgeschrieben (Geldmarktfonds wachsen
+    sehr gleichmaessig). Liefert (Kurs, Datum des letzten echten Kurses)."""
+    datum = _datum(datum)
+    k = kurse[(kurse["konto_id"] == konto_id) & (kurse["datum"] <= datum)]
+    if k.empty:
+        k = kurse[kurse["konto_id"] == konto_id]   # nur spaetere Kurse: den ersten nehmen
+        if k.empty:
+            return None, None
+        return float(k["kurs"].iloc[0]), k["datum"].iloc[0]
+    kurs, ab = float(k["kurs"].iloc[-1]), k["datum"].iloc[-1]
+    tage = (datum - ab).days
+    if tage > 0:
+        kurs *= (1 + satz_am(zinssaetze, konto_id, datum) / 100) ** (tage / TAGE_PRO_JAHR)
+    return kurs, ab
+
+
+def anteile_fuer(betrag: float, kurs: float | None) -> float | None:
+    return None if not kurs else round(float(betrag) / kurs, 8)
+
+
+def topf_salden(konten: pd.DataFrame, toepfe: pd.DataFrame, buchungen: pd.DataFrame,
+                zinssaetze: pd.DataFrame, kurse: pd.DataFrame, heute) -> pd.DataFrame:
+    """Je Topf: Einstand, Anteile, Wert, Buchgewinn/aufgelaufene Zinsen, Ertrag pro Tag.
+    Buchungen ohne Topf erscheinen als Pseudo-Topf "<konto_id>:ohne"."""
+    heute = _datum(heute)
+    b = buchungen[buchungen["datum"] <= heute].copy()
+    b["topf_key"] = [t if isinstance(t, str) else f"{k}:ohne" for t, k in zip(b["topf_id"], b["konto_id"])]
+    g = b.groupby(["konto_id", "topf_key"]).agg(einstand=("betrag", "sum"), anteile=("anteile", "sum")).reset_index()
+
+    # alle (auch leeren) Toepfe aufnehmen
+    tp = toepfe[toepfe["konto_id"].notna()] if "konto_id" in toepfe.columns else toepfe.iloc[0:0]
+    leer = tp[~tp["id"].isin(g["topf_key"])]
+    g = pd.concat([g, pd.DataFrame({"konto_id": leer["konto_id"], "topf_key": leer["id"],
+                                    "einstand": 0.0, "anteile": 0.0})], ignore_index=True)
+
+    kinfo = konten.set_index("id")
+    saldo_konten = konten[konten.get("bewertung", pd.Series("saldo", index=konten.index)).fillna("saldo") != "anteile"]
+    zinsen = aufgelaufene_zinsen(b, saldo_konten, zinssaetze, heute)
+
+    werte, auf, kurs_info = [], [], []
+    for _, r in g.iterrows():
+        kid = r["konto_id"]
+        bewertung = kinfo.at[kid, "bewertung"] if kid in kinfo.index and "bewertung" in kinfo.columns else "saldo"
+        if bewertung == "anteile":
+            kurs, ab = kurs_geschaetzt(kurse, zinssaetze, kid, heute)
+            wert = r["anteile"] * kurs if kurs else r["einstand"]
+            werte.append(wert)
+            auf.append(wert - r["einstand"])
+            kurs_info.append(ab)
+        else:
+            z = float(zinsen.get(kid, 0.0))
+            einst_k = g.loc[g["konto_id"] == kid, "einstand"].clip(lower=0)
+            anteil = (max(r["einstand"], 0) / einst_k.sum()) if einst_k.sum() > 0 else 0.0
+            werte.append(r["einstand"] + z * anteil)
+            auf.append(z * anteil)
+            kurs_info.append(None)
+    g["wert"], g["aufgelaufen"], g["kurs_stand"] = werte, auf, kurs_info
+
+    tinfo = toepfe.set_index("id") if not toepfe.empty else pd.DataFrame()
+    def t_attr(key, spalte, default=None):
+        if key in tinfo.index and spalte in tinfo.columns:
+            v = tinfo.at[key, spalte]
+            return default if v is None or (isinstance(v, float) and np.isnan(v)) else v
+        return default
+
+    g["topf_id"] = [k if not k.endswith(":ohne") else None for k in g["topf_key"]]
+    g["topf_name"] = [t_attr(k, "name", "ohne Topf") for k in g["topf_key"]]
+    g["stufe"] = [t_attr(k, "stufe") or (kinfo.at[kid, "stufe"] if kid in kinfo.index and "stufe" in kinfo.columns else "frei") or "frei"
+                  for k, kid in zip(g["topf_key"], g["konto_id"])]
+    g["ziel"] = pd.to_numeric(pd.Series([t_attr(k, "zielbetrag") for k in g["topf_key"]]), errors="coerce")
+    g["topf_aktiv"] = [bool(t_attr(k, "aktiv", True)) for k in g["topf_key"]]
+    for spalte, default in (("name", ""), ("institut", None), ("art", "sonstiges"), ("ertragsart", "keine"),
+                            ("risiko", 1), ("ertrag_ausgezahlt", False), ("bewertung", "saldo"), ("aktiv", True)):
+        g["konto_" + spalte if spalte in ("name", "aktiv") else spalte] = [
+            (kinfo.at[kid, spalte] if kid in kinfo.index and spalte in kinfo.columns else default) for kid in g["konto_id"]]
+    g["ertrag_ausgezahlt"] = g["ertrag_ausgezahlt"].fillna(False).astype(bool)
+    g["satz_pa"] = [satz_am(zinssaetze, kid, heute) for kid in g["konto_id"]]
+    g["ertrag_tag"] = g["wert"].clip(lower=0) * g["satz_pa"] / 100 / TAGE_PRO_JAHR
+    return g
+
+
 @dataclass
 class Ueberblick:
-    posten: pd.DataFrame        # je Posten: Salden, Satz, Tagesertrag, Ziel, Stufe
+    toepfe: pd.DataFrame        # je Topf (siehe topf_salden)
+    konten: pd.DataFrame        # je Konto: Wert, Einstand, Satz, Ertrag/Tag, Bestaetigt am
     stufen: pd.Series           # Summe je Stufe (Reihenfolge wie STUFEN)
     brutto: float
     verbindlichkeiten_offen: float
     netto: float
     frei: float
-    ertrag_tag_zins: float      # Zinsen, recht sicher
+    ertrag_tag_zins: float      # Zinsen (ausgezahlt + Buchgewinne der Geldmarktfonds)
     ertrag_tag_dividende: float  # erwartete Ausschuettungen
-    ertrag_tag_markt: float     # erwartete Kursrendite (gemessen oder Annahme)
+    ertrag_tag_markt: float     # erwartete Kursrendite (Depot)
+    ausgezahlt_tag_prognose: float   # davon tatsaechlich ausgezahlt (nach heutigem Bestand)
+    ausgezahlt_30_tage: float        # tatsaechlich gebuchte Auszahlungen der letzten 30 Tage
 
 
-def ueberblick(posten: pd.DataFrame, buchungen: pd.DataFrame, zinssaetze: pd.DataFrame,
-               verbindlichkeiten: pd.DataFrame | None, heute, ziele: dict | None = None) -> Ueberblick:
-    """posten = fin_konten (mit Spalte stufe). ziele: konto_id -> Zielbetrag."""
+def ueberblick(konten: pd.DataFrame, toepfe: pd.DataFrame, buchungen: pd.DataFrame, zinssaetze: pd.DataFrame,
+               verbindlichkeiten: pd.DataFrame | None, heute, kurse: pd.DataFrame | None = None) -> Ueberblick:
     heute = _datum(heute)
+    kurse = kurse_normalisieren(kurse) if kurse is None or "kurs" not in kurse.columns else kurse
+    t = topf_salden(konten, toepfe, buchungen, zinssaetze, kurse, heute)
+
     b = buchungen[buchungen["datum"] <= heute]
-
-    gebucht = gebuchte_salden(b, heute)
-    zinsen = aufgelaufene_zinsen(b, posten, zinssaetze, heute)
-
-    p = posten.copy()
-    if "stufe" not in p.columns:
-        p["stufe"] = "frei"
-    p["stufe"] = p["stufe"].fillna("frei")
-    p["gebucht"] = p["id"].map(gebucht).fillna(0.0)
-    p["aufgelaufen"] = p["id"].map(zinsen).fillna(0.0)
-    p["saldo"] = p["gebucht"] + p["aufgelaufen"]
-    p["satz_pa"] = [satz_am(zinssaetze, kid, heute) for kid in p["id"]]
-    p["ertrag_tag"] = p["saldo"].clip(lower=0) * p["satz_pa"] / 100 / TAGE_PRO_JAHR
     letzte_bestaetigung = b[b["typ"].isin(ZINS_RESET_TYPEN)].groupby("konto_id")["datum"].max()
-    # ueber dict mappen: bei leerer Postenliste scheitert pandas sonst am Datumstyp
-    p["bestaetigt_am"] = pd.to_datetime(p["id"].map(letzte_bestaetigung.to_dict()))
-    p["ziel"] = pd.to_numeric(p["id"].map(ziele or {}), errors="coerce")
+    k = t.groupby("konto_id").agg(wert=("wert", "sum"), einstand=("einstand", "sum"),
+                                  aufgelaufen=("aufgelaufen", "sum"), ertrag_tag=("ertrag_tag", "sum")).reset_index()
+    kinfo = konten.set_index("id")
+    for spalte in ("name", "institut", "art", "ertragsart", "risiko", "bewertung", "ertrag_ausgezahlt", "aktiv",
+                   "wkn", "standard_topf_id"):
+        k[spalte] = [kinfo.at[kid, spalte] if kid in kinfo.index and spalte in kinfo.columns else None for kid in k["konto_id"]]
+    k["satz_pa"] = [satz_am(zinssaetze, kid, heute) for kid in k["konto_id"]]
+    k["bestaetigt_am"] = pd.to_datetime(k["konto_id"].map(letzte_bestaetigung.to_dict()))
+    kurs_stand = t.groupby("konto_id")["kurs_stand"].max()
+    k["kurs_stand"] = pd.to_datetime(k["konto_id"].map(kurs_stand.to_dict()))
+    k["ertrag_ausgezahlt"] = k["ertrag_ausgezahlt"].fillna(False).astype(bool)
 
-    stufen = p.groupby("stufe")["saldo"].sum().reindex(list(STUFEN), fill_value=0.0)
-
+    stufen = t.groupby("stufe")["wert"].sum().reindex(list(STUFEN), fill_value=0.0)
     v = verbindlichkeiten_offen(verbindlichkeiten, b)
     offen = float(v["offen"].sum()) if not v.empty else 0.0
-    brutto = float(p["saldo"].sum())
+    brutto = float(t["wert"].sum())
 
-    def ertrag(art):
-        return float(p.loc[p["ertragsart"] == art, "ertrag_tag"].sum())
+    def ertrag(art, nur_ausgezahlt=False):
+        m = k["ertragsart"] == art
+        if nur_ausgezahlt:
+            m &= k["ertrag_ausgezahlt"]
+        return float(k.loc[m, "ertrag_tag"].sum())
+
+    ausgezahlt_konten = set(k.loc[k["ertrag_ausgezahlt"], "konto_id"])
+    letzte = b[(b["datum"] > heute - pd.Timedelta(days=30)) & b["typ"].isin(["zins", "ertrag"])
+               & b["konto_id"].isin(ausgezahlt_konten) & (b["betrag"] > 0)]
 
     return Ueberblick(
-        posten=p, stufen=stufen, brutto=brutto, verbindlichkeiten_offen=offen,
+        toepfe=t, konten=k, stufen=stufen, brutto=brutto, verbindlichkeiten_offen=offen,
         netto=brutto - offen, frei=float(stufen["frei"]),
-        ertrag_tag_zins=ertrag("zins"), ertrag_tag_dividende=ertrag("dividende"),
-        ertrag_tag_markt=ertrag("markt"),
+        ertrag_tag_zins=ertrag("zins"), ertrag_tag_dividende=ertrag("dividende"), ertrag_tag_markt=ertrag("markt"),
+        ausgezahlt_tag_prognose=ertrag("zins", True) + ertrag("dividende", True),
+        ausgezahlt_30_tage=float(letzte["betrag"].sum()),
     )
 
 
-def stufen_verlauf(buchungen: pd.DataFrame, posten: pd.DataFrame, bis) -> pd.DataFrame:
-    """Taeglicher gebuchter Saldo je Stufe (Spalten in STUFEN-Reihenfolge)."""
-    verlauf = saldo_verlauf(buchungen, bis)
-    if verlauf.empty:
-        return verlauf
-    stufe = posten.set_index("id")["stufe"].fillna("frei")
-    gruppen = verlauf.T.groupby(lambda kid: stufe.get(kid, "frei")).sum().T
-    return gruppen.reindex(columns=[s for s in STUFEN if s in gruppen.columns])
+def saldo_verlauf_je(buchungen: pd.DataFrame, spalte: str, bis) -> pd.DataFrame:
+    """Wie saldo_verlauf, aber je beliebiger Spalte (z. B. topf_id)."""
+    b = buchungen.copy()
+    b["konto_id"] = b[spalte].fillna("ohne")
+    return saldo_verlauf(b, bis)
+
+
+def stufen_verlauf(buchungen: pd.DataFrame, konten: pd.DataFrame, toepfe: pd.DataFrame, bis) -> pd.DataFrame:
+    """Taeglicher gebuchter Einstand je Stufe (Stufe kommt vom Topf)."""
+    if buchungen.empty:
+        return pd.DataFrame(index=pd.DatetimeIndex([], name="datum"))
+    stufe_topf = toepfe.set_index("id")["stufe"].to_dict() if "stufe" in toepfe.columns else {}
+    stufe_konto = konten.set_index("id")["stufe"].to_dict() if "stufe" in konten.columns else {}
+    b = buchungen.copy()
+    b["stufe"] = [stufe_topf.get(t) or stufe_konto.get(k) or "frei" for t, k in zip(b["topf_id"], b["konto_id"])]
+    verlauf = saldo_verlauf_je(b, "stufe", bis)
+    return verlauf.reindex(columns=[s for s in STUFEN if s in verlauf.columns])
 
 
 def ertrag_verlauf(buchungen: pd.DataFrame, konten: pd.DataFrame, zinssaetze: pd.DataFrame,
@@ -407,16 +521,36 @@ def startdatum(buchungen: pd.DataFrame, konto_id) -> pd.Timestamp | None:
 
 # --- Fixkosten ------------------------------------------------------------------------
 
+FIXKOSTEN_MODI = {
+    "direkt": "Direkt (monatlich einzahlen, wird abgebucht)",
+    "ansparen": "Ansparen (Rate pro Monat, Auszahlung bei Fälligkeit)",
+    "budget": "Budget (wird im Monat nach und nach verbraucht)",
+}
+REST_REGELN = {
+    "rest_topf": "Überschuss/Fehlbetrag über den Rest-Topf ausgleichen",
+    "verrechnen": "Differenz bleibt im Topf und wird mit der nächsten Einzahlung verrechnet",
+}
+
+
 def fixkosten_normalisieren(df: pd.DataFrame) -> pd.DataFrame:
-    spalten = ["id", "name", "betrag", "intervall_monate", "naechste_faelligkeit", "konto_id",
-               "kategorie", "aktiv", "notiz"]
+    spalten = ["id", "name", "betrag", "intervall_monate", "naechste_faelligkeit", "konto_id", "kategorie",
+               "aktiv", "notiz", "topf_id", "modus", "rate_monat", "rest_regel", "rest_topf_id",
+               "auto_abbuchen", "prognose_fuelbudget"]
     if df is None or df.empty:
         return pd.DataFrame({c: pd.Series(dtype="object") for c in spalten})
     df = df.copy()
+    for c in spalten:
+        if c not in df.columns:
+            df[c] = None
     df["betrag"] = pd.to_numeric(df["betrag"], errors="coerce").fillna(0.0).astype(float)
     df["intervall_monate"] = pd.to_numeric(df["intervall_monate"], errors="coerce").fillna(1).astype(int)
+    df["rate_monat"] = pd.to_numeric(df["rate_monat"], errors="coerce")
+    df["rate_monat"] = df["rate_monat"].fillna(df["betrag"] / df["intervall_monate"])
     df["naechste_faelligkeit"] = pd.to_datetime(df["naechste_faelligkeit"]).dt.normalize()
-    df["aktiv"] = df["aktiv"].fillna(True).astype(bool)
+    df["modus"] = df["modus"].fillna("direkt")
+    df["rest_regel"] = df["rest_regel"].fillna("rest_topf")
+    for c, d in (("aktiv", True), ("auto_abbuchen", False), ("prognose_fuelbudget", False)):
+        df[c] = df[c].fillna(d).astype(bool)
     return df.sort_values("naechste_faelligkeit").reset_index(drop=True)
 
 
@@ -429,45 +563,119 @@ def monatsende(datum) -> pd.Timestamp:
     return _datum(datum) + pd.offsets.MonthEnd(0)
 
 
-def soll_heute(betrag: float, intervall: int, faellig, heute) -> float:
-    """Wie viel fuer diese Fixkosten heute zurueckgelegt sein sollte.
-
-    - Monatlich: der volle Betrag, solange er in diesem Monat noch nicht
-      bezahlt ist (Faelligkeit spaetestens am Monatsende), sonst 0.
-    - Alle n Monate: anteilig nach verstrichener Zeit seit der letzten
-      Faelligkeit (linear), am Faelligkeitstag der volle Betrag."""
+def einzahlungen_bis(heute, faellig) -> int:
+    """Wie viele Monatsend-Einzahlungen (Lohn) liegen noch vor der Faelligkeit?
+    Gezaehlt werden Monatsenden E mit heute <= E < Faelligkeit."""
     heute, faellig = _datum(heute), _datum(faellig)
-    if faellig <= heute:
-        return float(betrag)
-    if intervall <= 1:
-        return float(betrag) if faellig <= monatsende(heute) else 0.0
-    vorher = monate_weiter(faellig, -intervall)
-    anteil = (heute - vorher).days / max((faellig - vorher).days, 1)
-    return float(betrag) * min(max(anteil, 0.0), 1.0)
+    n, e = 0, monatsende(heute)
+    while e < faellig:
+        n += 1
+        e = monatsende(e + pd.Timedelta(days=1))
+    return n
 
 
-def fixkosten_soll(fixkosten: pd.DataFrame, heute) -> pd.DataFrame:
-    """Je aktiver Fixkostenposition: Monatsanteil und heutiges Soll."""
-    f = fixkosten[fixkosten["aktiv"]].copy() if not fixkosten.empty else fixkosten.copy()
+def faelligkeiten_bis(faellig, intervall: int, bis) -> int:
+    """Anzahl Faelligkeiten ab `faellig` (im Intervall) bis einschliesslich `bis`."""
+    n, d = 0, _datum(faellig)
+    while d <= _datum(bis) and n < 60:
+        n += 1
+        d = monate_weiter(d, intervall)
+    return n
+
+
+def pro_monat(f: pd.Series | dict) -> float:
+    """Monatlicher Anteil einer Fixkostenposition (z. B. 304 € vierteljaehrlich -> 102 € Rate)."""
+    return float(f["rate_monat"]) if pd.notna(f.get("rate_monat")) else float(f["betrag"]) / int(f["intervall_monate"])
+
+
+def fixkosten_status(fix: pd.DataFrame, toepfe_salden: pd.DataFrame, heute) -> pd.DataFrame:
+    """Je aktiver Position: Einstand/Wert ihres Topfes, angesparte Raten, Prognose
+    zur Faelligkeit (inkl. noch kommender Monatseinzahlungen) und Fehlbetrag."""
+    f = fix[fix["aktiv"]].copy() if not fix.empty else fix.copy()
     if f.empty:
-        return f.assign(pro_monat=pd.Series(dtype=float), soll=pd.Series(dtype=float))
-    f["pro_monat"] = f["betrag"] / f["intervall_monate"]
-    f["soll"] = [soll_heute(r["betrag"], r["intervall_monate"], r["naechste_faelligkeit"], heute)
-                 for _, r in f.iterrows()]
+        return f.assign(einstand=pd.Series(dtype=float), wert=pd.Series(dtype=float))
+    ts = toepfe_salden.set_index("topf_key") if not toepfe_salden.empty else pd.DataFrame()
+    f["einstand"] = [float(ts.at[t, "einstand"]) if isinstance(t, str) and t in ts.index else 0.0 for t in f["topf_id"]]
+    f["wert"] = [float(ts.at[t, "wert"]) if isinstance(t, str) and t in ts.index else 0.0 for t in f["topf_id"]]
+    f["pro_monat"] = [pro_monat(r) for _, r in f.iterrows()]
+    f["raten"] = np.where(f["modus"] == "ansparen", f["einstand"] / f["pro_monat"].replace(0, np.nan), np.nan)
+    kommend = [einzahlungen_bis(heute, d) if m == "ansparen" else 0 for d, m in zip(f["naechste_faelligkeit"], f["modus"])]
+    f["einzahlungen_bis_faellig"] = kommend
+    voll = f["pro_monat"] * f["intervall_monate"]
+    f["prognose_faellig"] = np.where(
+        f["modus"] == "ansparen",
+        np.minimum(f["wert"] + f["pro_monat"] * f["einzahlungen_bis_faellig"],
+                   np.maximum(voll, f["wert"])),
+        f["wert"])
+    f["fehlt_bei_faelligkeit"] = np.where(f["modus"] == "ansparen",
+                                          (f["betrag"] - f["prognose_faellig"]).clip(lower=0), 0.0)
     return f
 
 
-def fixkosten_je_posten(fixkosten: pd.DataFrame, salden: pd.Series, heute) -> pd.DataFrame:
-    """Soll/Ist je Posten, aus dem Fixkosten bezahlt werden.
-    Spalten: konto_id, soll, ist, differenz (Ist - Soll), pro_monat."""
-    f = fixkosten_soll(fixkosten, heute)
-    f = f[f["konto_id"].notna()] if not f.empty else f
-    if f.empty:
-        return pd.DataFrame(columns=["konto_id", "soll", "ist", "differenz", "pro_monat"])
-    g = f.groupby("konto_id").agg(soll=("soll", "sum"), pro_monat=("pro_monat", "sum")).reset_index()
-    g["ist"] = g["konto_id"].map(salden).fillna(0.0)
-    g["differenz"] = g["ist"] - g["soll"]
-    return g
+def einzahlung_vorschlag(f: pd.Series | dict, einstand: float, heute, prognose_monat: float | None = None) -> float:
+    """Was beim naechsten Lohn fuer diese Position eingezahlt werden sollte.
+
+    - direkt:  Betrag x Faelligkeiten bis Ende des naechsten Monats - was schon da ist
+    - ansparen, Rest-Topf: volle Rate, bis Rate x Intervall erreicht ist
+    - ansparen, verrechnen (ESN): auf die naechste volle Rate auffuellen
+      (5 € Rest aus der letzten Bestellung -> nur 24 € statt 29 €)
+    - budget (Kraftstoff): Monatsbetrag (ggf. FuelBudget-Prognose) - Rest im Topf"""
+    rate = pro_monat(f)
+    if f["modus"] == "budget":
+        betrag = prognose_monat if (f.get("prognose_fuelbudget") and prognose_monat) else rate
+        return _rund(max(betrag - einstand, 0.0))
+    if f["modus"] == "direkt":
+        bis = monatsende(monatsende(heute) + pd.Timedelta(days=1))
+        bedarf = float(f["betrag"]) * faelligkeiten_bis(f["naechste_faelligkeit"], 1, bis)
+        if f["rest_regel"] == "rest_topf":
+            return _rund(bedarf) if einstand < 0.005 else _rund(max(bedarf - einstand, 0.0))
+        return _rund(max(bedarf - einstand, 0.0))
+    voll = rate * int(f["intervall_monate"])
+    if f["rest_regel"] == "verrechnen":
+        ziel = min((np.floor(einstand / rate + 1e-6) + 1) * rate, voll) if rate > 0 else 0.0
+        return _rund(max(ziel - einstand, 0.0))
+    return _rund(min(rate, max(voll - einstand, 0.0)))
+
+
+def zahlung_buchen(f: pd.Series | dict, betrag_ist: float, datum, topf_wert: float,
+                   konto_bewertung: str = "saldo", kurs: float | None = None, kategorie: str | None = None) -> list[dict]:
+    """Buchungen fuer eine bezahlte Fixkostenposition.
+
+    1. Ausgabe aus dem Topf der Position.
+    2. Regel "rest_topf": Was danach im Topf bleibt (Aufrundung, Zinsen, guenstigere
+       Rechnung), geht in den Rest-Topf; fehlt etwas (GoodNotes 13 € bei 12 x 1 €),
+       kommt es von dort. Regel "verrechnen": Rest bleibt im Topf."""
+    datum = str(_datum(datum).date())
+    fonds = konto_bewertung == "anteile"
+    basis = {"datum": datum, "konto_id": f["konto_id"]}
+    zeilen = [{**basis, "topf_id": f["topf_id"], "betrag": -_rund(betrag_ist), "typ": "ausgabe",
+               "kategorie": kategorie or f.get("kategorie") or "Abos & Verträge", "beschreibung": f["name"],
+               **({"anteile": anteile_fuer(-betrag_ist, kurs)} if fonds else {})}]
+    rest = _rund(topf_wert - betrag_ist)
+    rest_topf = f.get("rest_topf_id")
+    if f["rest_regel"] == "rest_topf" and isinstance(rest_topf, str) and abs(rest) >= 0.005:
+        von, nach = (f["topf_id"], rest_topf) if rest > 0 else (rest_topf, f["topf_id"])
+        gruppe = str(uuid.uuid4())
+        text = f"{f['name']}: Überschuss in Rest-Topf" if rest > 0 else f"{f['name']}: Fehlbetrag aus Rest-Topf"
+        for topf, vorzeichen in ((von, -1), (nach, 1)):
+            zeilen.append({**basis, "topf_id": topf, "betrag": vorzeichen * abs(rest), "typ": "umbuchung",
+                           "gruppe": gruppe, "beschreibung": text,
+                           **({"anteile": anteile_fuer(vorzeichen * abs(rest), kurs)} if fonds else {})})
+    return zeilen
+
+
+def faellige_abbuchungen(fix: pd.DataFrame, heute) -> list[tuple[dict, pd.Timestamp]]:
+    """Automatische Lastschriften, die bis heute faellig waren: [(Position, Datum), ...]."""
+    heute = _datum(heute)
+    ergebnis = []
+    if fix.empty:
+        return ergebnis
+    for _, f in fix[fix["aktiv"] & fix["auto_abbuchen"] & (fix["modus"] == "direkt")].iterrows():
+        d, n = f["naechste_faelligkeit"], 0
+        while d <= heute and n < 24:
+            ergebnis.append((f.to_dict(), d))
+            d, n = monate_weiter(d, f["intervall_monate"]), n + 1
+    return sorted(ergebnis, key=lambda x: x[1])
 
 
 # --- Depot-Rendite ----------------------------------------------------------------------

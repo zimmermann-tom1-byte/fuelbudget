@@ -245,3 +245,23 @@ def auto_select(weekly: pd.Series, min_train: int = AUTO_MIN_TRAIN,
         "ziel": ziel,
         "halbwertszeit": halbwertszeit,
     }
+
+
+def monatsprognose(df: pd.DataFrame, today: pd.Timestamp) -> dict:
+    """Erwartete Spritkosten fuer einen typischen Monat, genau wie die
+    FuelBudget-Seite im Modus "Automatisch" rechnet (inkl. Puffer).
+    df: Spalten date (datetime) und amount. Liefert {"monat", "woche", "label"}."""
+    weekly = weekly_amounts(df, today)
+    basis = complete_weeks(weekly, today)
+    if basis.empty:
+        basis = weekly
+    if basis.empty:
+        return {"monat": 0.0, "woche": 0.0, "label": "keine Daten"}
+    auto = auto_select(basis)
+    if auto is not None:
+        mode, window, k, puffer, label = auto["mode"], auto["window"], auto["k"], auto["puffer"], auto["label"]
+    else:
+        mode, window, k, puffer, label = "EMA", None, 0.15, 10, "Standard EMA, K = 0.15"
+    trend = forecast_trend(basis, mode, window, k or 0.15)
+    woche = float(trend.iloc[-1]) * (1 + puffer / 100.0) if not trend.empty else 0.0
+    return {"monat": woche * 52 / 12, "woche": woche, "label": f"{label}, {puffer:+d} % Puffer"}

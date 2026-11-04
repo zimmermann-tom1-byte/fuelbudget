@@ -16,7 +16,7 @@ def posten():
          "standard_topf_id": "t_giro", "aktiv": True, "stufe": "frei"},
         {"id": "fix", "name": "Fixkosten", "art": "giro", "ertragsart": "keine", "risiko": 1,
          "standard_topf_id": "t_fix", "aktiv": True, "stufe": "fixkosten"},
-    ])
+    ]).assign(bewertung="saldo", ertrag_ausgezahlt=False)
 
 
 def zinssaetze():
@@ -68,58 +68,6 @@ def test_abgleich_setzt_zinsschaetzung_zurueck():
     assert z["tg"] == pytest.approx(3653.65 * 0.073 / 365)
 
 
-def test_ueberblick_stufen_brutto_netto():
-    v = pd.DataFrame([{"id": "v1", "name": "Geldbuße", "betrag_gesamt": 1200, "erledigt": False}])
-    bu = buchungen([
-        {"datum": "2026-11-01", "konto_id": "mmf", "betrag": 1200, "typ": "eroeffnung"},
-        {"datum": "2026-11-01", "konto_id": "tg", "betrag": 1600, "typ": "eroeffnung"},
-        {"datum": "2026-11-01", "konto_id": "giro", "betrag": 300, "typ": "eroeffnung"},
-        {"datum": "2026-11-01", "konto_id": "depot", "betrag": 4000, "typ": "eroeffnung"},
-        {"datum": "2026-11-01", "konto_id": "fix", "betrag": 583, "typ": "eroeffnung"},
-        {"datum": "2026-11-05", "konto_id": "mmf", "betrag": -200, "typ": "ausgabe", "verbindlichkeit_id": "v1"},
-    ])
-    u = b.ueberblick(posten(), bu, zinssaetze(), v, "2026-11-01", ziele={"tg": 2000})
-    assert u.brutto == pytest.approx(7683)
-    assert u.verbindlichkeiten_offen == pytest.approx(1200)
-    # Fixkosten verringern das Netto NICHT, nur die Verbindlichkeit
-    assert u.netto == pytest.approx(7683 - 1200)
-    assert u.frei == pytest.approx(300)
-    assert list(u.stufen.index) == list(b.STUFEN)
-    assert u.stufen["fixkosten"] == pytest.approx(583)
-    assert u.stufen["langfristig"] == pytest.approx(4000)
-    assert u.posten.set_index("id").at["tg", "ziel"] == 2000
-
-    u = b.ueberblick(posten(), bu, zinssaetze(), v, "2026-11-06")
-    assert u.verbindlichkeiten_offen == pytest.approx(1000)
-    zinsen_mmf = 1200 * 0.02 / 365 * 4 + 1000 * 0.02 / 365
-    assert u.stufen["verbindlichkeit"] == pytest.approx(1000 + zinsen_mmf)
-    # Tilgung aendert das Netto nicht (Geld weg, Schuld weg)
-    zinsen_tg = 1600 * 0.0365 / 365 * 5
-    assert u.netto == pytest.approx(7683 - 1200 + zinsen_mmf + zinsen_tg)
-
-
-def test_stufen_verlauf():
-    bu = buchungen([
-        {"datum": "2026-11-01", "konto_id": "giro", "betrag": 100, "typ": "eroeffnung"},
-        {"datum": "2026-11-01", "konto_id": "depot", "betrag": 1000, "typ": "eroeffnung"},
-        {"datum": "2026-11-02", "konto_id": "giro", "betrag": -40, "typ": "ausgabe"},
-    ])
-    sv = b.stufen_verlauf(bu, posten(), "2026-11-02")
-    assert list(sv.columns) == ["frei", "langfristig"]
-    assert list(sv["frei"]) == [100, 60]
-
-
-def test_tagesertrag_nach_ertragsart():
-    bu = buchungen([
-        {"datum": "2026-11-01", "konto_id": "mmf", "betrag": 3650, "typ": "eroeffnung"},
-        {"datum": "2026-11-01", "konto_id": "depot", "betrag": 3650, "typ": "eroeffnung"},
-    ])
-    u = b.ueberblick(posten(), bu, zinssaetze(), None, "2026-11-01")
-    assert u.ertrag_tag_zins == pytest.approx(3650 * 0.02 / 365)
-    assert u.ertrag_tag_markt == pytest.approx(3650 * 0.07 / 365)
-    assert u.ertrag_tag_dividende == 0
-
-
 def test_ertrag_verlauf_waechst_mit_einzahlung():
     bu = buchungen([
         {"datum": "2026-11-01", "konto_id": "mmf", "betrag": 1000, "typ": "eroeffnung"},
@@ -166,37 +114,6 @@ def test_gruppen_abgleich_verteilt_anteilig():
     assert [z["betrag"] for z in b.gruppen_abgleich(leer, 10, "2026-11-30")] == [5, 5]
 
 
-def test_soll_heute_monatlich():
-    # Gym 30 €, faellig am 15.11.: im November voll zurueckgelegt
-    assert b.soll_heute(30, 1, "2026-11-15", "2026-11-02") == 30
-    assert b.soll_heute(30, 1, "2026-11-15", "2026-11-20") == 30  # ueberfaellig
-    # bereits bezahlt -> naechste Faelligkeit im Dezember -> heute 0
-    assert b.soll_heute(30, 1, "2026-12-15", "2026-11-20") == 0
-
-
-def test_soll_heute_quartal_linear():
-    # 300 € alle 3 Monate, faellig 1.2.2027 -> letzte Faelligkeit 1.11.2026
-    assert b.soll_heute(300, 3, "2027-02-01", "2026-11-01") == pytest.approx(0)
-    mitte = b.soll_heute(300, 3, "2027-02-01", "2026-12-17")
-    assert 145 < mitte < 155
-    assert b.soll_heute(300, 3, "2027-02-01", "2027-02-01") == 300
-
-
-def test_fixkosten_je_posten():
-    f = b.fixkosten_normalisieren(pd.DataFrame([
-        {"id": "1", "name": "Gym", "betrag": 30, "intervall_monate": 1, "naechste_faelligkeit": "2026-11-15",
-         "konto_id": "fix", "aktiv": True},
-        {"id": "2", "name": "Kfz", "betrag": 300, "intervall_monate": 3, "naechste_faelligkeit": "2027-02-01",
-         "konto_id": "fix", "aktiv": True},
-        {"id": "3", "name": "alt", "betrag": 99, "intervall_monate": 1, "naechste_faelligkeit": "2026-11-15",
-         "konto_id": "fix", "aktiv": False},
-    ]))
-    g = b.fixkosten_je_posten(f, pd.Series({"fix": 100.0}), "2026-11-01").set_index("konto_id")
-    assert g.at["fix", "soll"] == pytest.approx(30)
-    assert g.at["fix", "pro_monat"] == pytest.approx(30 + 100)
-    assert g.at["fix", "differenz"] == pytest.approx(70)
-
-
 def test_monate_weiter():
     assert b.monate_weiter("2027-01-31", 1) == pd.Timestamp("2027-02-28")
     assert b.monate_weiter("2026-11-15", 6) == pd.Timestamp("2027-05-15")
@@ -238,3 +155,163 @@ def test_vor_startbestand_findet_doppelte_buchung():
     assert b.startdatum(bu, "depot") == pd.Timestamp("2026-11-01")
     assert b.startdatum(bu, "giro") is None
     assert b.vor_startbestand(b.leere_buchungen()).empty
+
+
+# --- Konto/Topf-Modell mit Anteilsrechnung (echte Zahlen vom 04.11.) -----------------
+
+def modell():
+    konten = pd.DataFrame([
+        {"id": "dbx", "name": "T212 Geldmarktfonds (DBX0AN)", "art": "geldmarktfonds", "ertragsart": "zins",
+         "bewertung": "anteile", "ertrag_ausgezahlt": False, "stufe": "fixkosten", "risiko": 2, "aktiv": True},
+        {"id": "vb", "name": "Volksbank Fixkostenkonto", "art": "giro", "ertragsart": "keine",
+         "bewertung": "saldo", "ertrag_ausgezahlt": False, "stufe": "fixkosten", "risiko": 1, "aktiv": True},
+        {"id": "bbva", "name": "BBVA Tagesgeld", "art": "tagesgeld", "ertragsart": "zins",
+         "bewertung": "saldo", "ertrag_ausgezahlt": True, "stufe": "ruecklage", "risiko": 1, "aktiv": True},
+    ])
+    toepfe = pd.DataFrame([
+        {"id": "kfz", "name": "KFZ-Versicherung", "konto_id": "dbx", "stufe": "fixkosten", "aktiv": True, "zielbetrag": None},
+        {"id": "esn", "name": "ESN", "konto_id": "dbx", "stufe": "fixkosten", "aktiv": True, "zielbetrag": None},
+        {"id": "gn", "name": "GoodNotes", "konto_id": "dbx", "stufe": "fixkosten", "aktiv": True, "zielbetrag": None},
+        {"id": "zahn", "name": "Zahnarzt", "konto_id": "dbx", "stufe": "fixkosten", "aktiv": True, "zielbetrag": None},
+        {"id": "linsen", "name": "Kontaktlinsen", "konto_id": "dbx", "stufe": "fixkosten", "aktiv": True, "zielbetrag": None},
+        {"id": "ueb", "name": "Überschuss & Zinsen", "konto_id": "dbx", "stufe": "fixkosten", "aktiv": True, "zielbetrag": None},
+        {"id": "gym", "name": "Gym", "konto_id": "vb", "stufe": "fixkosten", "aktiv": True, "zielbetrag": None},
+        {"id": "marge", "name": "Sicherheitsmarge", "konto_id": "vb", "stufe": "fixkosten", "aktiv": True, "zielbetrag": None},
+        {"id": "auto", "name": "Autorücklagen", "konto_id": "bbva", "stufe": "ruecklage", "aktiv": True, "zielbetrag": 2000},
+    ])
+    ek = 150.646
+    bu = buchungen([
+        {"datum": "2026-11-01", "konto_id": "dbx", "topf_id": "kfz", "betrag": 102, "anteile": 102 / ek, "typ": "eroeffnung"},
+        {"datum": "2026-11-01", "konto_id": "dbx", "topf_id": "esn", "betrag": 29, "anteile": 29 / ek, "typ": "eroeffnung"},
+        {"datum": "2026-11-01", "konto_id": "dbx", "topf_id": "gn", "betrag": 1, "anteile": 1 / ek, "typ": "eroeffnung"},
+        {"datum": "2026-11-01", "konto_id": "dbx", "topf_id": "zahn", "betrag": 64, "anteile": 64 / ek, "typ": "eroeffnung"},
+        {"datum": "2026-11-01", "konto_id": "dbx", "topf_id": "linsen", "betrag": 14, "anteile": 14 / ek, "typ": "eroeffnung"},
+        {"datum": "2026-11-01", "konto_id": "vb", "topf_id": "gym", "betrag": 30, "typ": "eroeffnung"},
+        {"datum": "2026-11-01", "konto_id": "vb", "topf_id": "marge", "betrag": 18.64, "typ": "eroeffnung"},
+        {"datum": "2026-11-04", "konto_id": "vb", "topf_id": "gym", "betrag": -30, "typ": "ausgabe"},
+        {"datum": "2026-11-01", "konto_id": "bbva", "topf_id": "auto", "betrag": 1598.75, "typ": "eroeffnung"},
+    ])
+    zins = b.zinssaetze_normalisieren(pd.DataFrame([
+        {"konto_id": "dbx", "gueltig_ab": "2026-11-01", "satz_pa": 2.5},
+        {"konto_id": "bbva", "gueltig_ab": "2026-11-01", "satz_pa": 3.5},
+    ]))
+    kurse = b.kurse_normalisieren(pd.DataFrame([
+        {"konto_id": "dbx", "datum": "2026-11-01", "kurs": 210.04 / 1.394, "wert": 210.04},
+        {"konto_id": "dbx", "datum": "2026-11-04", "kurs": 210.07 / 1.394, "wert": 210.07},
+    ]))
+    return konten, toepfe, bu, zins, kurse
+
+
+def test_anteilsrechnung_verteilt_buchgewinn_auf_toepfe():
+    konten, toepfe, bu, zins, kurse = modell()
+    t = b.topf_salden(konten, toepfe, bu, zins, kurse, "2026-11-04").set_index("topf_key")
+    gesamt = t.loc[["kfz", "esn", "gn", "zahn", "linsen", "ueb"], "wert"].sum()
+    assert gesamt == pytest.approx(210.07, abs=0.005)           # exakt dein Stand
+    assert t.loc[["kfz", "esn", "gn", "zahn", "linsen"], "einstand"].sum() == pytest.approx(210.00)
+    assert t.at["kfz", "aufgelaufen"] == pytest.approx(0.07 * 102 / 210, abs=0.002)  # Buchgewinn anteilig
+    assert t.at["ueb", "wert"] == 0  # leerer Topf ist trotzdem da
+
+
+def test_kurs_wird_mit_satz_fortgeschrieben():
+    konten, toepfe, bu, zins, kurse = modell()
+    kurs, ab = b.kurs_geschaetzt(kurse, zins, "dbx", "2026-12-04")
+    assert ab == pd.Timestamp("2026-11-04")
+    assert kurs == pytest.approx(210.07 / 1.394 * 1.025 ** (30 / 365))
+
+
+def test_ueberblick_ertraege_ausgezahlt_vs_buchgewinn():
+    konten, toepfe, bu, zins, kurse = modell()
+    u = b.ueberblick(konten, toepfe, bu, zins, None, "2026-11-04", kurse)
+    assert u.brutto == pytest.approx(210.07 + 18.64 + 1598.75 + 1598.75 * 0.035 / 365 * 3, abs=0.01)
+    assert u.stufen["fixkosten"] == pytest.approx(210.07 + 18.64, abs=0.01)
+    # Zinsen insgesamt: BBVA + Geldmarktfonds; ausgezahlt nur BBVA
+    assert u.ertrag_tag_zins > u.ausgezahlt_tag_prognose > 0
+    assert u.ausgezahlt_tag_prognose == pytest.approx(u.konten.set_index("konto_id").at["bbva", "ertrag_tag"])
+    assert u.ausgezahlt_30_tage == 0
+    bu2 = pd.concat([bu, buchungen([{"datum": "2026-11-30", "konto_id": "bbva", "topf_id": "auto", "betrag": 4.6, "typ": "zins"}])])
+    u2 = b.ueberblick(konten, toepfe, bu2, zins, None, "2026-11-30", kurse)
+    assert u2.ausgezahlt_30_tage == pytest.approx(4.6)
+
+
+def test_stufen_verlauf_nach_topf():
+    konten, toepfe, bu, zins, kurse = modell()
+    sv = b.stufen_verlauf(bu, konten, toepfe, "2026-11-04")
+    assert list(sv.columns) == ["fixkosten", "ruecklage"]
+    assert sv["fixkosten"].iloc[-1] == pytest.approx(210 + 18.64)
+
+
+def fixpos(**k):
+    basis = {"id": "x", "name": "X", "betrag": 30.0, "intervall_monate": 1, "naechste_faelligkeit": "2026-12-01",
+             "konto_id": "vb", "topf_id": "gym", "modus": "direkt", "rate_monat": None, "rest_regel": "rest_topf",
+             "rest_topf_id": "marge", "auto_abbuchen": True, "prognose_fuelbudget": False, "aktiv": True,
+             "kategorie": "Freizeit", "notiz": None}
+    return b.fixkosten_normalisieren(pd.DataFrame([{**basis, **k}])).iloc[0]
+
+
+def test_einzahlung_direkt():
+    gym = fixpos(name="Gym")                                   # schon bezahlt, naechste am 01.12.
+    assert b.einzahlung_vorschlag(gym, 0.0, "2026-11-30") == 30
+    congstar = fixpos(name="Congstar", betrag=22.0, naechste_faelligkeit="2026-11-15")
+    assert b.einzahlung_vorschlag(congstar, 22.0, "2026-11-04") == 22   # Nov noch offen + Dez
+
+
+def test_einzahlung_ansparen():
+    kfz = fixpos(name="KFZ", betrag=304.0, rate_monat=102.0, intervall_monate=3, modus="ansparen",
+                 naechste_faelligkeit="2027-01-01", konto_id="dbx", topf_id="kfz", rest_topf_id="ueb")
+    assert b.einzahlung_vorschlag(kfz, 102.0, "2026-11-30") == 102
+    assert b.einzahlung_vorschlag(kfz, 306.0, "2026-12-31") == 0
+    esn = fixpos(name="ESN", betrag=87.0, rate_monat=29.0, intervall_monate=3, modus="ansparen", rest_regel="verrechnen")
+    assert b.einzahlung_vorschlag(esn, 5.0, "2026-11-30") == 24      # 5 € Rest aus letzter Bestellung
+    assert b.einzahlung_vorschlag(esn, 29.0, "2026-11-30") == 29
+    assert b.einzahlung_vorschlag(esn, 87.0, "2026-11-30") == 0
+
+
+def test_einzahlung_budget_mit_prognose():
+    kraft = fixpos(name="Kraftstoff", betrag=450.0, modus="budget", rest_regel="verrechnen", prognose_fuelbudget=True)
+    assert b.einzahlung_vorschlag(kraft, 20.0, "2026-11-30", prognose_monat=370.83) == pytest.approx(350.83)
+    assert b.einzahlung_vorschlag(kraft.to_dict() | {"prognose_fuelbudget": False}, 20.0, "2026-11-30") == 430
+
+
+def test_fixkosten_status_warnt_zahnarzt():
+    konten, toepfe, bu, zins, kurse = modell()
+    ts = b.topf_salden(konten, toepfe, bu, zins, kurse, "2026-11-04")
+    zahn = fixpos(name="Zahnarzt", betrag=96.0, rate_monat=16.0, intervall_monate=6, modus="ansparen",
+                  naechste_faelligkeit="2026-12-01", konto_id="dbx", topf_id="zahn")
+    kfz = fixpos(name="KFZ", betrag=304.0, rate_monat=102.0, intervall_monate=3, modus="ansparen",
+                 naechste_faelligkeit="2027-01-01", konto_id="dbx", topf_id="kfz")
+    st = b.fixkosten_status(pd.DataFrame([zahn, kfz]), ts, "2026-11-04").set_index("name")
+    assert st.at["Zahnarzt", "raten"] == pytest.approx(4)
+    assert st.at["Zahnarzt", "einzahlungen_bis_faellig"] == 1          # nur noch Ende November
+    assert st.at["Zahnarzt", "fehlt_bei_faelligkeit"] == pytest.approx(16, abs=0.05)
+    assert st.at["KFZ", "fehlt_bei_faelligkeit"] == 0                    # 102 + 2 x 102 >= 304
+
+
+def test_zahlung_mit_rest_topf_und_fehlbetrag():
+    kfz = fixpos(name="KFZ", betrag=304.0, rate_monat=102.0, intervall_monate=3, modus="ansparen",
+                 konto_id="dbx", topf_id="kfz", rest_topf_id="ueb")
+    zeilen = b.zahlung_buchen(kfz, 304, "2027-01-02", topf_wert=306.80, konto_bewertung="anteile", kurs=151.0)
+    assert zeilen[0]["betrag"] == -304 and zeilen[0]["anteile"] == pytest.approx(-304 / 151)
+    rest = [z for z in zeilen if z["typ"] == "umbuchung"]
+    assert {(z["topf_id"], z["betrag"]) for z in rest} == {("kfz", -2.8), ("ueb", 2.8)}
+    gn = fixpos(name="GoodNotes", betrag=13.0, rate_monat=1.0, intervall_monate=12, modus="ansparen",
+                konto_id="dbx", topf_id="gn", rest_topf_id="ueb")
+    zeilen = b.zahlung_buchen(gn, 13, "2027-10-08", topf_wert=12.10, konto_bewertung="anteile", kurs=152.0)
+    rest = {z["topf_id"]: z["betrag"] for z in zeilen if z["typ"] == "umbuchung"}
+    assert rest == {"ueb": -0.9, "gn": 0.9}                              # fehlender Betrag aus dem Rest-Topf
+    esn = fixpos(name="ESN", betrag=87.0, modus="ansparen", rest_regel="verrechnen", topf_id="esn")
+    assert len(b.zahlung_buchen(esn, 82, "2027-01-05", topf_wert=87.2)) == 1  # Rest bleibt im Topf
+
+
+def test_faellige_abbuchungen():
+    f = b.fixkosten_normalisieren(pd.DataFrame([
+        dict(fixpos(name="Claude", betrag=21.0, naechste_faelligkeit="2026-10-15")),
+        dict(fixpos(name="ZZV", betrag=5.0, auto_abbuchen=False, naechste_faelligkeit="2026-10-01")),
+    ]))
+    fae = b.faellige_abbuchungen(f, "2026-11-20")
+    assert [(x[0]["name"], x[1].strftime("%d.%m.")) for x in fae] == [("Claude", "15.10."), ("Claude", "15.11.")]
+
+
+def test_einzahlungen_bis():
+    assert b.einzahlungen_bis("2026-11-04", "2026-12-01") == 1
+    assert b.einzahlungen_bis("2026-11-04", "2027-01-01") == 2
+    assert b.einzahlungen_bis("2026-11-30", "2026-12-01") == 1

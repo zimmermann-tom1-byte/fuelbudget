@@ -16,19 +16,19 @@ TZ = ZoneInfo("Europe/Berlin")
 heute = pd.Timestamp(datetime.now(TZ).date())
 eur = b.eur
 
-d = daten.alles()
-posten, toepfe = d["konten"], d["toepfe"]
+d = daten.alles_aktuell(heute)
+konten, toepfe = d["konten"], d["toepfe"]
 
 st.title("Vermögen 💶")
 
 # --- DATENPRUEFUNG: Buchungen vor dem Startbestand zaehlen doppelt ---------------
 falsch = b.vor_startbestand(d["buchungen"])
 if not falsch.empty:
-    namen = dict(zip(posten["id"], posten["name"]))
+    namen = dict(zip(konten["id"], konten["name"]))
     liste = "\n".join(f"- {r['datum']:%d.%m.%Y} · {namen.get(r['konto_id'], '?')} · {eur(r['betrag'])} "
                       f"({r['typ']})" for _, r in falsch.iterrows())
     st.error(
-        f"**Datenprüfung: {len(falsch)} Buchung(en) liegen vor dem Startbestand ihres Postens** und "
+        f"**Datenprüfung: {len(falsch)} Buchung(en) liegen vor dem Startbestand ihres Kontos** und "
         f"werden dadurch doppelt gezählt (zusammen {eur(float(falsch['betrag'].sum()))}).\n\n{liste}"
     )
     if st.button("🧹 Diese Buchungen entfernen", type="primary", key="datencheck_bereinigen"):
@@ -39,36 +39,28 @@ if not falsch.empty:
         else:
             daten.nach_schreibzugriff(f"{len(falsch)} Buchung(en) entfernt. Die Summen stimmen wieder.")
 
-if posten.empty:
-    st.info("Noch keine Posten angelegt. Unter **Posten** führt dich der Tab „Start“ durch die Einrichtung.")
-    st.page_link("seiten/verwaltung.py", label="Zu den Posten", icon="🗂️")
+if konten.empty:
+    st.info("Noch keine Konten angelegt. Unter **Konten & Töpfe** führt dich der Tab „Start“ durch die Einrichtung.")
+    st.page_link("seiten/verwaltung.py", label="Zu Konten & Töpfe", icon="🗂️")
     st.stop()
 
-ziele = {kid: topf_ziel for kid, topf_ziel in zip(
-    posten["id"], posten["standard_topf_id"].map(dict(zip(toepfe["id"], toepfe["zielbetrag"]))))
-    if pd.notna(topf_ziel) and topf_ziel > 0}
-u = b.ueberblick(posten, d["buchungen"], d["zinssaetze"], d["verbindlichkeiten"], heute, ziele)
+u = b.ueberblick(konten, toepfe, d["buchungen"], d["zinssaetze"], d["verbindlichkeiten"], heute, d["kurse"])
+fix = d["fixkosten"]
+fix_monat = float(sum(b.pro_monat(r) for _, r in fix[fix["aktiv"]].iterrows())) if not fix.empty else 0.0
 
 # --- KENNZAHLEN ---------------------------------------------------------------
-ertrag_tag = u.ertrag_tag_zins + u.ertrag_tag_dividende
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Bruttovermögen", eur(u.brutto),
-          help="Summe aller Posten inkl. geschätzter, noch nicht gebuchter Zinsen.")
+          help="Summe aller Konten. Fonds zum aktuellen Kurs, Tagesgeld inkl. geschätzter, noch nicht gebuchter Zinsen.")
 c2.metric("Nettovermögen", eur(u.netto),
           delta=f"− {eur(u.verbindlichkeiten_offen)} Verbindlichkeiten" if u.verbindlichkeiten_offen else None,
           delta_color="off", help="Bruttovermögen minus offene Schulden (z. B. Geldbuße). "
                                   "Fixkosten sind keine Schulden und werden nicht abgezogen.")
 c3.metric("Frei verfügbar", eur(u.frei), help=b.STUFE_ERKLAERUNG["frei"])
-c4.metric("Passives Einkommen / Tag", eur(ertrag_tag, 3),
-          delta=f"≈ {eur(ertrag_tag * 365 / 12)} / Monat", delta_color="off",
-          help="Zinsen plus erwartete Ausschüttungen, vor Steuern. Ohne Kursentwicklung.")
-
-aufgelaufen = u.posten["aufgelaufen"].sum()
-if aufgelaufen > 0.005:
-    st.caption(
-        f"Enthält {eur(aufgelaufen)} geschätzte Zinsen seit dem letzten Abgleich. "
-        "Mit einem Kontoabgleich unter **Buchungen** werden sie zu echten Zahlen."
-    )
+c4.metric("Ausgezahltes Einkommen / Monat", eur(u.ausgezahlt_tag_prognose * 365 / 12),
+          delta=f"{eur(u.ausgezahlt_tag_prognose, 3)} / Tag", delta_color="off",
+          help="Nur Erträge, die tatsächlich ausgezahlt werden (Tagesgeld, Monefit, Dividenden), nach heutigem "
+               "Bestand. Buchgewinne der Geldmarktfonds sind nicht enthalten.")
 
 # --- STUFEN ---------------------------------------------------------------------
 st.markdown("### Wie verfügbar ist dein Geld?")
@@ -92,25 +84,25 @@ if u.brutto > 0 and not stufen.empty:
     )
     st.plotly_chart(bar, width="stretch", config={"displayModeBar": False})
 
+t_all = u.toepfe
 for stufe in b.STUFEN:
-    teil = u.posten[(u.posten["stufe"] == stufe) & (u.posten["aktiv"] | (u.posten["saldo"].abs() > 0.005))]
+    teil = t_all[(t_all["stufe"] == stufe) & ((t_all["topf_aktiv"] & t_all["konto_aktiv"]) | (t_all["wert"].abs() > 0.005))]
     if teil.empty:
         continue
-    summe = float(teil["saldo"].sum())
-    with st.expander(f"**{b.STUFEN[stufe]}** — {eur(summe)}", expanded=False):
+    with st.expander(f"**{b.STUFEN[stufe]}** — {eur(float(teil['wert'].sum()))}", expanded=False):
         st.caption(b.STUFE_ERKLAERUNG[stufe])
-        for _, row in teil.sort_values("saldo", ascending=False).iterrows():
-            wo = " · ".join(x for x in (row["institut"] if pd.notna(row["institut"]) else None,
-                                        b.KONTO_ARTEN.get(row["art"])) if x)
-            ziel = row["ziel"]
-            if pd.notna(ziel) and ziel > 0:
-                anteil = max(min(row["saldo"] / ziel, 1.0), 0.0)
-                st.progress(anteil, text=f"**{row['name']}** — {eur(row['saldo'])} von {eur(ziel)}")
-                rest = f"Es fehlen {eur(ziel - row['saldo'])}" if row["saldo"] < ziel else "Ziel erreicht"
-                st.caption(f"{wo} · {rest}")
-            else:
-                st.markdown(f"**{row['name']}** — {eur(row['saldo'])}")
-                st.caption(wo)
+        for konto_name, gruppe in teil.groupby("konto_name", sort=False):
+            st.markdown(f"**{konto_name}** — {eur(float(gruppe['wert'].sum()))}")
+            for _, row in gruppe.sort_values("wert", ascending=False).iterrows():
+                zusatz = ""
+                if row["bewertung"] == "anteile" and abs(row["aufgelaufen"]) >= 0.005:
+                    zusatz = f" (davon {eur(row['aufgelaufen'])} Buchgewinn)"
+                ziel = row["ziel"]
+                if pd.notna(ziel) and ziel > 0:
+                    anteil = max(min(row["wert"] / ziel, 1.0), 0.0)
+                    st.progress(anteil, text=f"{row['topf_name']} — {eur(row['wert'])} von {eur(ziel)}{zusatz}")
+                else:
+                    st.caption(f"• {row['topf_name']} — {eur(row['wert'])}{zusatz}")
 
 v = b.verbindlichkeiten_offen(d["verbindlichkeiten"], d["buchungen"])
 v = v[v["offen"] > 0.005] if not v.empty else v
@@ -122,53 +114,64 @@ if not v.empty:
                                  f"{eur(row['getilgt'])} von {eur(row['betrag_gesamt'])} getilgt")
 
 # --- ERTRAEGE -------------------------------------------------------------------
-st.markdown("### Was dein Geld täglich erwirtschaftet")
-fix = b.fixkosten_soll(d["fixkosten"], heute)
-fix_monat = float(fix["pro_monat"].sum()) if not fix.empty else 0.0
-e1, e2, e3, e4 = st.columns(4)
-e1.metric("Zinsen / Tag", eur(u.ertrag_tag_zins, 3), delta=f"{eur(u.ertrag_tag_zins * 365)} / Jahr",
-          delta_color="off")
-e2.metric("Ausschüttungen / Tag (erwartet)", eur(u.ertrag_tag_dividende, 3),
-          delta=f"{eur(u.ertrag_tag_dividende * 365)} / Jahr", delta_color="off")
-e3.metric("Kursrendite / Tag (erwartet)", eur(u.ertrag_tag_markt, 3),
-          delta=f"{eur(u.ertrag_tag_markt * 365)} / Jahr", delta_color="off",
-          help="Aus der gemessenen Depot-Rendite (Seite Depot-Rendite) bzw. deiner Annahme. "
-               "Tatsächlich schwankt der Depotwert stark.")
-if fix_monat > 0:
-    deckung = ertrag_tag * 365 / 12 / fix_monat
-    e4.metric("Fixkosten gedeckt durch passives Einkommen", f"{deckung * 100:.1f} %",
-              delta=f"{eur(ertrag_tag * 365 / 12)} von {eur(fix_monat)} / Monat", delta_color="off",
-              help="Zinsen und Ausschüttungen pro Monat geteilt durch deine Fixkosten pro Monat.")
-else:
-    e4.metric("Fixkosten gedeckt", "–", help="Erfasse deine Fixkosten auf der Seite Fixkosten.")
+st.markdown("### Was dein Geld erwirtschaftet")
+gesamt_tag = u.ertrag_tag_zins + u.ertrag_tag_dividende
+buch_tag = gesamt_tag - u.ausgezahlt_tag_prognose
+e1, e2, e3 = st.columns(3)
+e1.metric("Rechnerisch / Tag", eur(gesamt_tag, 3), delta=f"≈ {eur(gesamt_tag * 365 / 12)} / Monat",
+          delta_color="off", help="Alle Zinsen und Ausschüttungen inkl. Buchgewinne der Geldmarktfonds, vor Steuern. "
+                                  "Ohne Kursentwicklung des Depots.")
+e2.metric("Davon ausgezahlt / Tag", eur(u.ausgezahlt_tag_prognose, 3),
+          delta=f"≈ {eur(u.ausgezahlt_tag_prognose * 365 / 12)} / Monat", delta_color="off",
+          help="Erträge der Konten, die tatsächlich auszahlen. Nur dieses Geld kann Fixkosten bezahlen.")
+e3.metric("Davon Buchgewinne / Tag", eur(buch_tag, 3), delta=f"≈ {eur(buch_tag * 365 / 12)} / Monat",
+          delta_color="off", help="Bleiben im Fonds liegen (z. B. für Aufrundungen und GoodNotes).")
 
-tabelle = u.posten[(u.posten["ertragsart"] != "keine") & (u.posten["aktiv"] | (u.posten["saldo"].abs() > 0.005))].copy()
+f1, f2, f3 = st.columns(3)
+f1.metric("Tatsächlich ausgezahlt (letzte 30 Tage)", eur(u.ausgezahlt_30_tage),
+          help="Gebuchte Zins- und Ertragsgutschriften der auszahlenden Konten. Kommt über den Kontoabgleich "
+               "unter Buchungen ins Tool.")
+if fix_monat > 0:
+    deckung_prognose = u.ausgezahlt_tag_prognose * 365 / 12 / fix_monat
+    deckung_ist = u.ausgezahlt_30_tage / fix_monat
+    f2.metric("Fixkosten gedeckt (tatsächlich)", f"{deckung_ist * 100:.1f} %",
+              delta=f"{eur(u.ausgezahlt_30_tage)} von {eur(fix_monat)}", delta_color="off",
+              help="Tatsächliche Auszahlungen der letzten 30 Tage geteilt durch deine Fixkosten pro Monat.")
+    f3.metric("Fixkosten gedeckt (nach heutigem Bestand)", f"{deckung_prognose * 100:.1f} %",
+              delta=f"{eur(u.ausgezahlt_tag_prognose * 365 / 12)} von {eur(fix_monat)}", delta_color="off",
+              help="Was die auszahlenden Konten bei heutigem Bestand pro Monat bringen würden. Sinkt, wenn "
+                   "z. B. die Autorücklage für eine Reparatur gebraucht wird.")
+else:
+    f2.metric("Fixkosten gedeckt", "–", help="Erfasse deine Fixkosten auf der Seite Fixkosten.")
+st.caption(
+    "Warum zwei Werte für die Deckung? Die Auszahlungen hängen vom Bestand ab, und der schwankt "
+    "(Reparatur, Einkauf, Nachkauf im Crash). „Nach heutigem Bestand“ zeigt, was gerade zu erwarten ist, "
+    "„tatsächlich“ zeigt, was wirklich gekommen ist."
+)
+
+tabelle = u.konten[(u.konten["ertragsart"] != "keine") & (u.konten["aktiv"].fillna(True).astype(bool) | (u.konten["wert"].abs() > 0.005))].copy()
 tabelle = tabelle.sort_values("ertrag_tag", ascending=False)
 st.dataframe(pd.DataFrame({
-    "Posten": tabelle["name"],
-    "Stufe": tabelle["stufe"].map(b.STUFEN),
-    "Saldo (€)": tabelle["saldo"].round(2),
+    "Konto": tabelle["name"],
+    "Wert (€)": tabelle["wert"].round(2),
     "Satz % p. a.": tabelle["satz_pa"].round(2),
-    "€ / Tag": tabelle["ertrag_tag"].round(4),
     "€ / Monat": (tabelle["ertrag_tag"] * 365 / 12).round(2),
+    "Ertrag": tabelle["ertrag_ausgezahlt"].map({True: "ausgezahlt", False: "bleibt liegen"}),
     "Ertragsart": tabelle["ertragsart"].map(b.ERTRAGSARTEN),
     "Risiko": tabelle["risiko"],
-    "Bestätigt am": tabelle["bestaetigt_am"].dt.strftime("%d.%m.%Y").fillna("–"),
+    "Stand vom": [(k if pd.notna(k) else s).strftime("%d.%m.%Y") if pd.notna(k if pd.notna(k) else s) else "–"
+                  for k, s in zip(tabelle["kurs_stand"], tabelle["bestaetigt_am"])],
 }), hide_index=True, width="stretch", column_config={
-    "Saldo (€)": st.column_config.NumberColumn(format="%.2f €"),
-    "€ / Tag": st.column_config.NumberColumn(format="%.4f €"),
+    "Wert (€)": st.column_config.NumberColumn(format="%.2f €"),
     "€ / Monat": st.column_config.NumberColumn(format="%.2f €"),
     "Risiko": st.column_config.ProgressColumn(min_value=0, max_value=5, format="%d / 5"),
 })
-st.caption(
-    "Alle Erträge vor Steuern. Risiko: 1 = Einlagensicherung/Bargeld … 5 = ohne Sicherung (z. B. P2P). "
-    "„Bestätigt am“ = letzter Startbestand, Zins- oder Abgleichsbuchung."
-)
+st.caption("Alle Erträge vor Steuern. „Stand vom“ = letzter Kurs (Fonds) bzw. letzter Abgleich (Konten).")
 
 # --- VERLAUF ---------------------------------------------------------------------
 st.markdown("### Verlauf")
 bu_bis_heute = d["buchungen"][d["buchungen"]["datum"] <= heute]
-verlauf = b.stufen_verlauf(bu_bis_heute, posten, heute)
+verlauf = b.stufen_verlauf(bu_bis_heute, konten, toepfe, heute)
 if len(verlauf) < 2:
     st.info("Der Verlauf erscheint, sobald Buchungen an mehr als einem Tag vorliegen.")
 else:
@@ -182,30 +185,9 @@ else:
     fig.update_layout(
         template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=20, r=20, t=30, b=20), height=340, hovermode="x unified",
-        xaxis=dict(gridcolor="#1e293b"), yaxis=dict(title="€ (gebucht)", gridcolor="#1e293b"),
+        xaxis=dict(gridcolor="#1e293b"), yaxis=dict(title="€ (Einstand)", gridcolor="#1e293b"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         separators=",.",
     )
-    st.markdown("**Vermögen nach Stufe** (gebuchte Salden, ohne geschätzte Zinsen)")
+    st.markdown("**Vermögen nach Stufe** (gebuchte Beträge, ohne Buchgewinne und geschätzte Zinsen)")
     st.plotly_chart(fig, width="stretch")
-
-    ev = b.ertrag_verlauf(bu_bis_heute, posten, d["zinssaetze"], heute)
-    if not ev.empty:
-        efig = go.Figure()
-        farben = {"zins": "#38bdf8", "dividende": "#34d399", "markt": "#a78bfa"}
-        for art in ("zins", "dividende", "markt"):
-            if art in ev.columns:
-                efig.add_trace(go.Scatter(
-                    x=ev.index, y=ev[art], name=b.ERTRAGSARTEN[art], mode="lines",
-                    line=dict(color=farben[art], width=2.5, dash="dot" if art == "markt" else "solid"),
-                    hovertemplate="%{x|%d.%m.%Y}: %{y:.3f} €/Tag<extra></extra>",
-                ))
-        efig.update_layout(
-            template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            margin=dict(l=20, r=20, t=30, b=20), height=300,
-            xaxis=dict(gridcolor="#1e293b"), yaxis=dict(title="€ pro Tag", gridcolor="#1e293b"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            separators=",.",
-        )
-        st.markdown("**Passives Einkommen pro Tag** (gepunktet = erwartete Kursrendite)")
-        st.plotly_chart(efig, width="stretch")

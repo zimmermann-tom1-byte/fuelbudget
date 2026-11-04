@@ -15,28 +15,32 @@ TZ = ZoneInfo("Europe/Berlin")
 heute = pd.Timestamp(datetime.now(TZ).date())
 eur = b.eur
 
-d = daten.alles()
-posten = d["konten"]
-aktive = posten[posten["aktiv"]].copy()
-aktive["_o"] = aktive["stufe"].map({s: i for i, s in enumerate(b.STUFEN)})
-aktive = aktive.sort_values(["_o", "sortierung", "name"])
+d = daten.alles_aktuell(heute)
+konten, toepfe = d["konten"], d["toepfe"]
 
 st.title("Buchungen 🧾")
 
-if aktive.empty:
-    st.info("Lege zuerst unter **Posten** mindestens einen Posten an.")
-    st.page_link("seiten/verwaltung.py", label="Zu den Posten", icon="🗂️")
+konto_name = dict(zip(konten["id"], konten["name"]))
+aktive_konten = konten[konten["aktiv"]]
+aktive_toepfe = toepfe[toepfe["aktiv"] & toepfe["konto_id"].isin(aktive_konten["id"])].copy()
+if aktive_toepfe.empty:
+    st.info("Lege zuerst unter **Konten & Töpfe** ein Konto an.")
+    st.page_link("seiten/verwaltung.py", label="Zu Konten & Töpfe", icon="🗂️")
     st.stop()
 
-P_OPT = list(aktive["id"])
-posten_name = dict(zip(posten["id"], posten["name"]))
-posten_label = {r["id"]: f"{r['name']} · {b.STUFEN[r['stufe']]}" for _, r in posten.iterrows()}
-topf_von = {kid: (t if pd.notna(t) else None) for kid, t in zip(posten["id"], posten["standard_topf_id"])}
+reihenfolge = {kid: i for i, kid in enumerate(aktive_konten["id"])}
+aktive_toepfe["_o"] = aktive_toepfe["konto_id"].map(reihenfolge)
+aktive_toepfe = aktive_toepfe.sort_values(["_o", "sortierung", "name"])
+T_OPT = list(aktive_toepfe["id"])
+topf_konto = dict(zip(toepfe["id"], toepfe["konto_id"]))
+topf_name = dict(zip(toepfe["id"], toepfe["name"]))
+topf_label = {tid: f"{konto_name.get(topf_konto.get(tid), '?')} › {topf_name[tid]}" for tid in toepfe["id"]}
 
 
 def _speichern(zeilen, meldung):
     try:
-        daten.einfuegen("buchungen", zeilen)
+        daten.konto_buchungen_speichern(zeilen if isinstance(zeilen, list) else [zeilen],
+                                        d["kurse"], d["zinssaetze"], konten)
     except Exception as exc:
         st.error(daten.fehlertext(exc))
         return
@@ -60,7 +64,7 @@ with tab_ein:
                                      for _, r in offene_v.iterrows()})}
 
     with st.form("einnahme_ausgabe_form", clear_on_submit=True):
-        p_id = st.selectbox("Posten", P_OPT, format_func=posten_label.get, key="ea_posten")
+        t_id = st.selectbox("Konto › Topf", T_OPT, format_func=topf_label.get, key="ea_topf")
         c1, c2 = st.columns(2)
         datum = c1.date_input("Datum", value=heute.date(), format="DD.MM.YYYY")
         betrag = c2.number_input("Betrag (€)", min_value=0.0, step=0.01, format="%.2f")
@@ -77,7 +81,7 @@ with tab_ein:
             st.error("Bitte einen Betrag größer 0 eingeben.")
         else:
             _speichern({
-                "datum": str(datum), "konto_id": p_id, "topf_id": topf_von.get(p_id),
+                "datum": str(datum), "konto_id": topf_konto[t_id], "topf_id": t_id,
                 "betrag": -round(betrag, 2) if ist_ausgabe else round(betrag, 2),
                 "typ": "ausgabe" if ist_ausgabe else "einnahme",
                 "kategorie": kategorie, "beschreibung": beschreibung.strip() or None,
@@ -86,12 +90,15 @@ with tab_ein:
 
 # --- UMBUCHUNG ---------------------------------------------------------------------
 with tab_um:
-    st.caption("Geld von einem Posten auf einen anderen verschieben, z. B. Lohneingang → Fixkosten 3–6 Monate.")
+    st.caption(
+        "Geld zwischen Töpfen verschieben – auf ein anderes Konto (z. B. Volksbank Girokonto → Geldmarktfonds › "
+        "KFZ-Versicherung) oder innerhalb eines Kontos (z. B. Sicherheitsmarge → Gym)."
+    )
     with st.form("umbuchung_form", clear_on_submit=True):
         c1, c2 = st.columns(2)
-        von = c1.selectbox("Von", P_OPT, format_func=posten_label.get, key="um_von")
-        nach = c2.selectbox("Nach", P_OPT, format_func=posten_label.get, key="um_nach",
-                            index=1 if len(P_OPT) > 1 else 0)
+        von = c1.selectbox("Von", T_OPT, format_func=topf_label.get, key="um_von")
+        nach = c2.selectbox("Nach", T_OPT, format_func=topf_label.get, key="um_nach",
+                            index=1 if len(T_OPT) > 1 else 0)
         c3, c4 = st.columns(2)
         datum = c3.date_input("Datum", value=heute.date(), format="DD.MM.YYYY", key="um_datum")
         betrag = c4.number_input("Betrag (€)", min_value=0.0, step=0.01, format="%.2f", key="um_betrag")
@@ -99,62 +106,79 @@ with tab_um:
         ok = st.form_submit_button("Umbuchen", type="primary", width="stretch")
     if ok:
         try:
-            zeilen = b.umbuchung(datum, von, topf_von.get(von), nach, topf_von.get(nach), betrag,
+            zeilen = b.umbuchung(datum, topf_konto[von], von, topf_konto[nach], nach, betrag,
                                  beschreibung.strip() or None)
         except ValueError as exc:
             st.error(str(exc))
         else:
-            _speichern(zeilen, f"{eur(betrag)} von {posten_name[von]} nach {posten_name[nach]} umgebucht.")
+            _speichern(zeilen, f"{eur(betrag)} von {topf_label[von]} nach {topf_label[nach]} umgebucht.")
 
 # --- KONTOABGLEICH -----------------------------------------------------------------
 with tab_abgleich:
-    st.caption(
-        "Den echten Stand aus der Bank-App eintragen. Die Differenz wird gebucht: bei Zinsposten als "
-        "Zinsertrag, sonst als Wertänderung. Posten mit gleicher Abgleichsgruppe (z. B. ein Geldmarktfonds "
-        "für Geldbuße und Strafzettel) gleichst du gemeinsam ab, die Differenz wird anteilig verteilt."
-    )
-    u = b.ueberblick(posten, d["buchungen"], d["zinssaetze"], d["verbindlichkeiten"], heute)
-    up = u.posten[u.posten["aktiv"]].set_index("id")
-    # Auswahl: je Gruppe ein Eintrag, Posten ohne Gruppe einzeln
-    einheiten = {}
-    for kid, r in up.iterrows():
-        schluessel = f"gruppe:{r['abgleich_gruppe']}" if pd.notna(r["abgleich_gruppe"]) else f"posten:{kid}"
-        einheiten.setdefault(schluessel, []).append(kid)
-
-    def _einheit_label(k):
-        ids = einheiten[k]
-        if k.startswith("gruppe:"):
-            return f"{k[7:]} ({', '.join(posten_name[i] for i in ids)})"
-        return posten_name[ids[0]]
-
-    einheit = st.selectbox("Was gleichst du ab?", list(einheiten), format_func=_einheit_label, key="abgl_einheit")
-    ids = einheiten[einheit]
-    gebucht_sum = float(up.loc[ids, "gebucht"].sum())
-    geschaetzt = float(up.loc[ids, "saldo"].sum())
-    m1, m2 = st.columns(2)
-    m1.metric("Gebucht", eur(gebucht_sum))
-    m2.metric("Geschätzt inkl. Zinsen", eur(geschaetzt),
-              delta=eur(geschaetzt - gebucht_sum) if abs(geschaetzt - gebucht_sum) > 0.005 else None,
-              delta_color="off")
-    with st.form("abgleich_form"):
-        c1, c2 = st.columns(2)
-        datum = c1.date_input("Stand vom", value=heute.date(), format="DD.MM.YYYY", key="abgl_datum")
-        ist = c2.number_input("Tatsächlicher Stand (€)", value=float(round(geschaetzt, 2)),
-                              step=0.01, format="%.2f", key=f"abgl_ist_{einheit}")
-        ok = st.form_submit_button("Abgleichen", type="primary", width="stretch")
-    if ok:
-        gebucht_am = b.gebuchte_salden(d["buchungen"], datum)
-        eintraege = [{"id": kid, "ertragsart": up.at[kid, "ertragsart"],
-                      "standard_topf_id": topf_von.get(kid), "gebucht": float(gebucht_am.get(kid, 0.0))}
-                     for kid in ids]
-        zeilen = b.gruppen_abgleich(eintraege, ist, datum)
-        if not zeilen:
-            st.success("Stimmt bereits mit den Buchungen überein, nichts zu buchen.")
-        else:
-            summe = sum(z["betrag"] for z in zeilen)
-            art = "Zinsertrag" if all(z["typ"] == "zins" for z in zeilen) else "Wertänderung"
-            _speichern(zeilen, f"Abgleich gebucht: {eur(summe)} {art}"
-                               + (f", verteilt auf {len(zeilen)} Posten." if len(zeilen) > 1 else "."))
+    u = b.ueberblick(konten, toepfe, d["buchungen"], d["zinssaetze"], d["verbindlichkeiten"], heute, d["kurse"])
+    uk = u.konten.set_index("konto_id")
+    k_opt = [k for k in aktive_konten["id"] if k in uk.index]
+    k_id = st.selectbox("Konto", k_opt, format_func=konto_name.get, key="abgl_konto")
+    zeile = uk.loc[k_id]
+    fonds = zeile["bewertung"] == "anteile"
+    if fonds:
+        st.caption(
+            "Fonds: Trag den **Gesamtwert** laut App ein (z. B. am Monatsanfang). Daraus ergibt sich der Kurs; "
+            "die Buchgewinne verteilen sich automatisch anteilig auf die Töpfe. Bis zum nächsten Eintrag "
+            "schreibt das Tool den Kurs mit dem hinterlegten Satz fort."
+        )
+        anteile = float(u.toepfe.loc[u.toepfe["konto_id"] == k_id, "anteile"].sum())
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Einstand", eur(zeile["einstand"]))
+        m2.metric("Wert (geschätzt)", eur(zeile["wert"]), delta=eur(zeile["wert"] - zeile["einstand"]) + " Buchgewinn",
+                  delta_color="off")
+        m3.metric("Anteile laut Tool", f"{anteile:.4f}".replace(".", ","))
+        with st.form("kurs_form"):
+            c1, c2 = st.columns(2)
+            datum = c1.date_input("Stand vom", value=heute.date(), format="DD.MM.YYYY", key="kurs_datum")
+            wert = c2.number_input("Gesamtwert laut App (€)", min_value=0.0, value=float(round(zeile["wert"], 2)),
+                                   step=0.01, format="%.2f", key=f"kurs_wert_{k_id}")
+            ok = st.form_submit_button("Wert übernehmen", type="primary", width="stretch")
+        if ok:
+            if anteile <= 0:
+                st.error("Dieses Konto hat noch keine Anteile. Erst den Startbestand buchen.")
+            else:
+                kurs = wert / anteile
+                try:
+                    daten.einfuegen_oder_ersetzen("kurse", {"konto_id": k_id, "datum": str(datum),
+                                                            "kurs": round(kurs, 6), "wert": round(wert, 2)},
+                                                  konflikt="konto_id,datum")
+                except Exception as exc:
+                    st.error(daten.fehlertext(exc))
+                else:
+                    daten.nach_schreibzugriff(f"Wert {eur(wert)} übernommen (Kurs {kurs:.4f} €).".replace(".", ",", 1))
+    else:
+        st.caption(
+            "Den echten Kontostand aus der Bank-App eintragen. Die Differenz wird gebucht (bei Zinskonten als "
+            "Zinsertrag) und landet im Standardtopf des Kontos. Bei auszahlenden Konten zählt sie als "
+            "tatsächlich ausgezahlter Ertrag."
+        )
+        std = zeile["standard_topf_id"]
+        st.caption(f"Standardtopf: **{topf_name.get(std, '–')}**")
+        m1, m2 = st.columns(2)
+        m1.metric("Gebucht", eur(zeile["einstand"]))
+        m2.metric("Geschätzt inkl. Zinsen", eur(zeile["wert"]),
+                  delta=eur(zeile["aufgelaufen"]) if abs(zeile["aufgelaufen"]) > 0.005 else None, delta_color="off")
+        with st.form("abgleich_form"):
+            c1, c2 = st.columns(2)
+            datum = c1.date_input("Stand vom", value=heute.date(), format="DD.MM.YYYY", key="abgl_datum")
+            ist = c2.number_input("Tatsächlicher Stand (€)", value=float(round(zeile["wert"], 2)),
+                                  step=0.01, format="%.2f", key=f"abgl_ist_{k_id}")
+            ok = st.form_submit_button("Abgleichen", type="primary", width="stretch")
+        if ok:
+            gebucht_am = float(b.gebuchte_salden(d["buchungen"], datum).get(k_id, 0.0))
+            konto_row = konten.set_index("id").loc[k_id].to_dict() | {"id": k_id}
+            neu = b.abgleich(konto_row, ist, gebucht_am, datum)
+            if neu is None:
+                st.success("Stimmt bereits mit den Buchungen überein, nichts zu buchen.")
+            else:
+                art = "Zinsertrag" if neu["typ"] == "zins" else "Wertänderung"
+                _speichern(neu, f"Abgleich gebucht: {eur(neu['betrag'])} {art}.")
 
 # --- LISTE -------------------------------------------------------------------------
 with tab_liste:
@@ -166,18 +190,19 @@ with tab_liste:
         monate = sorted(bu["datum"].dt.to_period("M").unique(), reverse=True)
         monat = f1.selectbox("Monat", [None] + monate,
                              format_func=lambda p: "Alle" if p is None else p.strftime("%m/%Y"))
-        p_filter = f2.selectbox("Posten", [None] + list(posten["id"]),
-                                format_func=lambda k: "Alle" if k is None else posten_name.get(k, k))
+        k_filter = f2.selectbox("Konto", [None] + list(konten["id"]),
+                                format_func=lambda k: "Alle" if k is None else konto_name.get(k, k))
         sicht = bu
         if monat is not None:
             sicht = sicht[sicht["datum"].dt.to_period("M") == monat]
-        if p_filter is not None:
-            sicht = sicht[sicht["konto_id"] == p_filter]
+        if k_filter is not None:
+            sicht = sicht[sicht["konto_id"] == k_filter]
         sicht = sicht.reset_index(drop=True)
 
         anzeige = pd.DataFrame({
             "Datum": sicht["datum"].dt.strftime("%d.%m.%Y"),
-            "Posten": sicht["konto_id"].map(posten_name),
+            "Konto": sicht["konto_id"].map(konto_name),
+            "Topf": sicht["topf_id"].map(lambda t: topf_name.get(t, "?") if isinstance(t, str) else "–"),
             "Betrag": sicht["betrag"],
             "Typ": sicht["typ"],
             "Kategorie": sicht["kategorie"].fillna(""),
